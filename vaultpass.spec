@@ -1,12 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+datas = [('ui', 'ui'), ('resources', 'resources'), ('vault_client.py', '.'), ('config_manager.py', '.')]
+binaries = []
+hiddenimports = ['hvac']
+tmp_ret = collect_all('cryptography')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('hvac')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['src/main.py'],
+    ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=[('src/ui', 'src/ui')],
-    hiddenimports=['hvac', 'cryptography'],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -22,7 +31,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='vault-manager',
+    name='vaultpass',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
