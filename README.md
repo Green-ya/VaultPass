@@ -47,6 +47,22 @@ python main.py
 
 Или через `./run.sh`.
 
+### вариант для nix
+```bash
+nix run github:yarok-k/VaultPassNix
+```
+или для добавления в конфигурацию
+```flake.nix
+inputs = {
+  vaultpass.url = "github:ваш-юзернейм/VaultPassNix";
+};
+```
+```configuration.nix
+environment.systemPackages = [
+  inputs.vaultpass.packages.${pkgs.system}.default
+];
+```
+
 ## 🧭 Быстрый старт
 
 1. Нажмите «🔑 Подключиться» и укажите URL, токен и mount point (обычно `secret`).
