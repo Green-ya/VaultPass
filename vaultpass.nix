@@ -28,7 +28,7 @@ pkgs.python3Packages.buildPythonApplication {
   # Системные библиотеки
   buildInputs = with pkgs; [
     qt6.qtbase
-    gcr
+    gcr_4
     gnome-keyring
   ];
 

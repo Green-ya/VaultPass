@@ -49,12 +49,12 @@ python main.py
 
 ### вариант для nix
 ```bash
-nix run github:yarok-k/VaultPass
+nix run github:Green-ya/VaultPass
 ```
 или для добавления в конфигурацию
 ```flake.nix
 inputs = {
-  vaultpass.url = "github:ваш-юзернейм/VaultPassNix";
+  vaultpass.url = "github:Green-ya/VaultPassNix";
 };
 ```
 ```configuration.nix
