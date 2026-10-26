@@ -49,7 +49,7 @@ python main.py
 
 ### вариант для nix
 ```bash
-nix run github:yarok-k/VaultPassNix
+nix run github:yarok-k/VaultPass
 ```
 или для добавления в конфигурацию
 ```flake.nix
