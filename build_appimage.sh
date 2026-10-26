@@ -1,36 +1,59 @@
 #!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")"
 
 # Устанавливаем зависимости
 pip install -r requirements.txt
 
-# Собираем с помощью pyinstaller
-pyinstaller --name="vault-manager" \
-            --windowed \
-            --onefile \
-            --add-data "src/ui:src/ui" \
-            --hidden-import "hvac" \
-            --hidden-import "cryptography" \
-            src/main.py
+# Собираем исполняемый файл (spec уже включает ui и resources)
+pyinstaller --noconfirm vaultpass.spec
 
-# Скачиваем linuxdeploy и appimagetool
-# wget -c "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
-# wget -c "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
-chmod +x linuxdeploy-x86_64.AppImage appimagetool-x86_64.AppImage
+# Проверяем, что локальные модули действительно попали в архив
+python - << 'PY'
+import sys
 
-# Создаём AppDir
+from PyInstaller.archive.readers import CArchiveReader
+
+archive = CArchiveReader("dist/vaultpass")
+pyz = archive.open_embedded_archive("PYZ.pyz")
+required = {"config_manager", "resource_utils", "vault_client", "ui.main_window"}
+missing = required - set(pyz.toc)
+if missing:
+    sys.exit(f"В сборке отсутствуют модули: {sorted(missing)}")
+print("Проверка сборки: локальные модули на месте")
+PY
+
+# Готовим AppDir
+rm -rf AppDir
 mkdir -p AppDir/usr/bin
-cp dist/vault-manager AppDir/usr/bin/
-cp resources/icon.png AppDir/
-cat > AppDir/vault-manager.desktop << EOF
+cp dist/vaultpass AppDir/usr/bin/vaultpass
+cp resources/icon.png AppDir/vaultpass.png
+cp resources/icon.png AppDir/icon.png
+
+cat > AppDir/vaultpass.desktop << 'EOF'
 [Desktop Entry]
-Name=Vault Manager
-Comment=GUI for HashiCorp Vault
-Exec=vault-manager
-Icon=icon
+Name=VaultPass
+Comment=GUI-менеджер паролей для HashiCorp Vault
+Exec=vaultpass
+Icon=vaultpass
 Type=Application
-Categories=Utility;
+Terminal=false
+Categories=Utility;Security;
 EOF
 
-# Собираем AppImage
-./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage
-./appimagetool-x86_64.AppImage AppDir
+cat > AppDir/AppRun << 'EOF'
+#!/bin/sh
+HERE="$(dirname "$(readlink -f "$0")")"
+exec "$HERE/usr/bin/vaultpass" "$@"
+EOF
+chmod +x AppDir/AppRun
+
+chmod +x appimagetool-x86_64.AppImage
+
+# Собираем во временный файл и заменяем атомарно: это позволяет
+# пересобирать AppImage, даже если его текущая версия уже запущена.
+OUTPUT="VaultPass-x86_64.AppImage"
+TMP_OUTPUT="${OUTPUT}.new"
+rm -f "$TMP_OUTPUT"
+ARCH=x86_64 ./appimagetool-x86_64.AppImage AppDir "$TMP_OUTPUT"
+mv -f "$TMP_OUTPUT" "$OUTPUT"

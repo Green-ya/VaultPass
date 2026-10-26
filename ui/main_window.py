@@ -1,1128 +1,1235 @@
-import sys, os
-from PySide6.QtWidgets import *
-from PySide6.QtCore import Qt, QTimer, QSize
-from PySide6.QtGui import QIcon, QAction, QFont
+import html
+import math
+import os
+import time
 
-# Меняем импорты с src. на прямые
-from vault_client import VaultClient
+from PySide6.QtCore import QPointF, QSize, Qt, QTimer
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QStackedWidget,
+    QStyle,
+    QTableWidget,
+    QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
 from config_manager import ConfigManager
-from ui.dialogs import ConfigDialog, SecretDialog
+from resource_utils import get_resource_path
+from ui.dialogs import ConfigDialog, DeleteSecretDialog, SecretDialog
+from ui.search_dialog import SearchDialog
+from vault_client import VaultClient
+
 
 class MainWindow(QMainWindow):
+    CACHE_TTL = 120  # секунд
+    CLIPBOARD_CLEAR_SECONDS = 30
+    PREVIEW_LIMIT = 30  # сколько значений подгружать сразу в списке каталога
+    MASK_CHARS = 12  # фиксированное число символов в маскированном значении
+
     def __init__(self):
         super().__init__()
         self.config_manager = ConfigManager()
         self.client = None
-        self.current_path = ""
-        self.show_passwords = False  
-        self.debug_mode = False  
-        
+        self.debug_mode = False
+
+        self._active_path = ""
+        self._directory_path = ""
+        self._secret_path = None
+        self._secret_data = {}
+        self._secret_cache = {}
+
+        self._clipboard_value = None
+        self._clipboard_deadline = None
+
         self.setWindowTitle("VaultPass - Менеджер паролей")
         self.setGeometry(100, 100, 1100, 750)
-        
-        # Устанавливаем иконку приложения (если есть)
-        # self.setWindowIcon(QIcon("resources/icon.png"))
-        
+
+        self._eye_icon_hidden = self._build_eye_icon(crossed=False)
+        self._eye_icon_visible = self._build_eye_icon(crossed=True)
+
+        self._clipboard_timer = QTimer(self)
+        # 250 мс, чтобы подпись не «перескакивала» через секунду из-за
+        # погрешности таймера Qt и всегда показывала актуальный остаток.
+        self._clipboard_timer.setInterval(250)
+        self._clipboard_timer.timeout.connect(self._update_clipboard_countdown)
+
         self._create_menu()
         self._create_widgets()
         self._load_config()
 
-    def get_resource_path(self, relative_path):
-        """Получить путь к ресурсу, работает и для dev, и для сборки PyInstaller"""
-        try:
-            base_path = sys._MEIPASS
-        except Exception:
-            base_path = os.path.abspath(".")
-        return os.path.join(base_path, relative_path)
-
+    # ------------------------------------------------------------------
+    # Вспомогательные методы
+    # ------------------------------------------------------------------
     def debug_log(self, *args):
-        """Выводит отладочную информацию только если debug_mode включён"""
         if self.debug_mode:
             print("[DEBUG]", *args)
 
     def toggle_debug_mode(self, checked):
-        """Включает/выключает режим отладки"""
         self.debug_mode = checked
-        if checked:
-            self.status_label.setText("🐛 Режим отладки включён")
-            self.debug_log("Debug mode enabled")
-        else:
-            self.status_label.setText("Готово")
-            print("Debug mode disabled")  # Этот print всегда виден
+        self.status_label.setText(
+            "🐛 Режим отладки включён" if checked else "Готово"
+        )
 
+    def _build_eye_icon(self, crossed: bool) -> QIcon:
+        """Рисуем иконку глаза; перечёркнутый — значение открыто."""
+        size = 20
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        pen = QPen(QColor("#444444"))
+        pen.setWidthF(1.6)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        eye_path = QPainterPath()
+        eye_path.moveTo(2, 10)
+        eye_path.cubicTo(5, 5, 15, 5, 18, 10)
+        eye_path.cubicTo(15, 15, 5, 15, 2, 10)
+        painter.drawPath(eye_path)
+
+        painter.setBrush(QColor("#444444"))
+        painter.drawEllipse(QPointF(10, 10), 2.3, 2.3)
+
+        if crossed:
+            painter.setPen(QPen(QColor("#c62828"), 1.8))
+            painter.drawLine(3, 3, 17, 17)
+
+        painter.end()
+        return QIcon(pixmap)
+
+    # ------------------------------------------------------------------
+    # Кэш секретов
+    # ------------------------------------------------------------------
+    def _get_secret(self, path, force=False):
+        """Читает секрет через кэш с TTL."""
+        now = time.monotonic()
+        cached = self._secret_cache.get(path)
+        if cached and not force and now - cached[0] < self.CACHE_TTL:
+            return cached[1]
+
+        data = self.client.read_secret(path)
+        self._secret_cache[path] = (now, data)
+        return data
+
+    def _invalidate_cache(self, path=None):
+        if path is None:
+            self._secret_cache.clear()
+            return
+
+        self._secret_cache.pop(path, None)
+        prefix = path.rstrip("/") + "/"
+        for cached_path in [p for p in self._secret_cache if p.startswith(prefix)]:
+            self._secret_cache.pop(cached_path, None)
+
+    # ------------------------------------------------------------------
+    # Меню
+    # ------------------------------------------------------------------
     def _create_menu(self):
-        """Создаём меню"""
         menubar = self.menuBar()
-        
+
         file_menu = menubar.addMenu("Файл")
-        connect_action = QAction("Подключиться к Vault", self)
+        connect_action = QAction("Подключиться к Vault…", self)
+        connect_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
         connect_action.triggered.connect(self.show_config_dialog)
         file_menu.addAction(connect_action)
-        
+
         file_menu.addSeparator()
         exit_action = QAction("Выход", self)
+        exit_action.setShortcut(QKeySequence("Ctrl+Q"))
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-    
-        # Меню Вид
+
+        edit_menu = menubar.addMenu("Правка")
+        self.search_action = QAction("Поиск по Vault…", self)
+        self.search_action.setShortcut(QKeySequence("Ctrl+F"))
+        self.search_action.triggered.connect(self.show_search_dialog)
+        edit_menu.addAction(self.search_action)
+
+        self.refresh_action = QAction("Обновить", self)
+        self.refresh_action.setShortcut("F5")
+        self.refresh_action.triggered.connect(self.refresh)
+        edit_menu.addAction(self.refresh_action)
+
         view_menu = menubar.addMenu("Вид")
-        
-        # 🔥 Пункт для включения дебага
         debug_action = QAction("Режим отладки", self)
         debug_action.setCheckable(True)
         debug_action.setChecked(self.debug_mode)
         debug_action.triggered.connect(self.toggle_debug_mode)
         view_menu.addAction(debug_action)
-        
-        view_menu.addSeparator()
-        
-        refresh_action = QAction("Обновить", self)
-        refresh_action.setShortcut("F5")
-        refresh_action.triggered.connect(self.refresh)
-        view_menu.addAction(refresh_action)
 
-        tools_menu = menubar.addMenu("Инструменты")
-        refresh_action = QAction("Обновить", self)
-        refresh_action.setShortcut("F5")
-        refresh_action.triggered.connect(self.refresh)
-        tools_menu.addAction(refresh_action)
-    
-
-    def refresh(self):
-        """Обновляем дерево папок"""
-        if not self.client:
-            QMessageBox.warning(self, "Ошибка", "Сначала подключитесь к Vault")
-            return
-        
-        # Очищаем дерево (если оно есть)
-        if hasattr(self, 'tree') and self.tree:
-            self.tree.clear()
-            root = QTreeWidgetItem(self.tree)
-            root.setText(0, "📁 /")
-            root.setData(0, Qt.UserRole, "")
-            self._populate_tree(root, "")
-            root.setExpanded(True)
-        else:
-            # Если дерева нет, просто обновляем текущую вкладку
-            current_tab = self.tab_widget.currentWidget()
-            if current_tab:
-                # Ищем таблицу во вкладке
-                table = current_tab.findChild(QTableWidget)
-                if table:
-                    path = table.property("vault_path") or ""
-                    self.load_tab_content(table, path)
-
+    # ------------------------------------------------------------------
+    # Виджеты
+    # ------------------------------------------------------------------
     def _create_widgets(self):
-        """Создаём виджеты"""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        
+
         layout = QVBoxLayout(central_widget)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        
+
         # --- Панель с кнопками ---
         top_panel = QWidget()
         top_panel.setFixedHeight(50)
-        top_panel.setStyleSheet("""
+        top_panel.setStyleSheet(
+            """
             QWidget {
                 background-color: #f0f0f0;
                 border-bottom: 1px solid #ccc;
             }
-        """)
-        
+            """
+        )
+
         panel_layout = QHBoxLayout(top_panel)
         panel_layout.setContentsMargins(10, 5, 10, 5)
 
-        # 🔥 Добавляем логотип на панель
-        logo_path = self.get_resource_path("resources/vaultpass_logo.png")
+        logo_path = get_resource_path("resources/vaultpass_logo.png")
         if os.path.exists(logo_path):
             logo_label = QLabel()
             pixmap = QPixmap(logo_path)
-            # Масштабируем до 32px высоты
-            scaled_pixmap = pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            logo_label.setPixmap(scaled_pixmap)
+            logo_label.setPixmap(
+                pixmap.scaled(32, 32, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
             panel_layout.addWidget(logo_label)
 
         self.btn_connect = QPushButton("🔑 Подключиться")
         self.btn_connect.clicked.connect(self.show_config_dialog)
         panel_layout.addWidget(self.btn_connect)
-        
+
         self.btn_refresh = QPushButton("🔄 Обновить")
         self.btn_refresh.clicked.connect(self.refresh)
         panel_layout.addWidget(self.btn_refresh)
 
-        self.btn_toggle_passwords = QPushButton("👁️ Показать пароли")
-        self.btn_toggle_passwords.setCheckable(True)  # Режим переключателя
-        self.btn_toggle_passwords.toggled.connect(self.toggle_passwords_visibility)
-        self.btn_toggle_passwords.setStyleSheet("""
-            QPushButton:checked {
-                background-color: #0078d4;
-                color: white;
-            }
-        """)
-        panel_layout.addWidget(self.btn_toggle_passwords)
-
         self.btn_new = QPushButton("➕ Новый секрет")
         self.btn_new.clicked.connect(self.create_secret)
         panel_layout.addWidget(self.btn_new)
-        
-        self.btn_delete = QPushButton("🗑️ Удалить")
-        self.btn_delete.clicked.connect(self.delete_secret)
-        panel_layout.addWidget(self.btn_delete)
-        
+
+        self.btn_search = QPushButton("🔍 Поиск")
+        self.btn_search.clicked.connect(self.show_search_dialog)
+        panel_layout.addWidget(self.btn_search)
+
         panel_layout.addStretch()
-        
+
         self.status_label = QLabel("Не подключено")
         panel_layout.addWidget(self.status_label)
-        
+
         layout.addWidget(top_panel)
-        
-        # --- Разделитель: дерево + вкладки ---
+
+        # --- Разделитель: дерево + правая панель ---
         splitter = QSplitter(Qt.Horizontal)
         layout.addWidget(splitter)
-        
-        # Левая панель с деревом
+
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Заголовок дерева
+
         tree_label = QLabel("📂 Структура Vault")
-        tree_label.setStyleSheet("""
+        tree_label.setStyleSheet(
+            """
             QLabel {
                 padding: 8px;
                 background: #f8f9fa;
                 border-bottom: 1px solid #dee2e6;
                 font-weight: bold;
             }
-        """)
+            """
+        )
         left_layout.addWidget(tree_label)
-        
-        # Само дерево
+
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setIconSize(QSize(20, 20))
-        self.tree.itemDoubleClicked.connect(self.on_tree_click)
-        self.tree.itemExpanded.connect(self.on_tree_expanded) 
-        self.tree.itemSelectionChanged.connect(self.on_tree_selection_changed)
+        self.tree.setExpandsOnDoubleClick(False)
+        self.tree.itemExpanded.connect(self.on_tree_expanded)
+        self.tree.currentItemChanged.connect(self.on_tree_current_changed)
+        self.tree.setStyleSheet(
+            """
+            QTreeWidget::item { padding: 4px; }
+            QTreeWidget::item:hover { background: #e8f0fe; }
+            QTreeWidget::item:selected { background: #d2e3fc; }
+            """
+        )
         left_layout.addWidget(self.tree)
-        
+
         splitter.addWidget(left_widget)
-        
-        # Правая панель с вкладками
-        self.tab_widget = QTabWidget()
-        self.tab_widget.setTabsClosable(True)
-        self.tab_widget.tabCloseRequested.connect(self.close_tab)
-        self.tab_widget.currentChanged.connect(self.on_tab_changed)
-        self.tab_widget.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #ccc;
-                background: white;
-            }
-            QTabBar::tab {
-                padding: 8px 16px;
-                margin-right: 2px;
-            }
-            QTabBar::tab:selected {
-                background: #e0e0e0;
-                border-bottom: 2px solid #0078d4;
-            }
-        """)
-        
-        splitter.addWidget(self.tab_widget)
+
+        self.content_stack = QStackedWidget()
+        self.empty_page = self._create_empty_page()
+        self.directory_page = self._create_directory_page()
+        self.secret_page = self._create_secret_page()
+        self.content_stack.addWidget(self.empty_page)
+        self.content_stack.addWidget(self.directory_page)
+        self.content_stack.addWidget(self.secret_page)
+        self.content_stack.setCurrentWidget(self.empty_page)
+
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+        right_layout.addWidget(self.content_stack, 1)
+
+        actions_bar = QWidget()
+        actions_bar.setObjectName("actionsBar")
+        actions_bar.setStyleSheet(
+            "#actionsBar { background: #f8f9fa; "
+            "border-top: 1px solid #dee2e6; }"
+        )
+        actions_layout = QHBoxLayout(actions_bar)
+        actions_layout.setContentsMargins(10, 6, 10, 6)
+
+        self.delete_target_label = QLabel("Секрет не выбран")
+        self.delete_target_label.setStyleSheet("color: #666;")
+        actions_layout.addWidget(self.delete_target_label, 1)
+
+        self.btn_delete = QPushButton("🗑️ Удалить")
+        self.btn_delete.setObjectName("deleteButton")
+        self.btn_delete.setEnabled(False)
+        self.btn_delete.setToolTip("Выберите секрет для удаления")
+        self.btn_delete.clicked.connect(self.delete_secret)
+        actions_layout.addWidget(self.btn_delete)
+
+        right_layout.addWidget(actions_bar)
+
+        splitter.addWidget(right_panel)
         splitter.setSizes([300, 700])
-        
-        # Создаём первую вкладку
-        self.add_tab("", "/")
 
-    def on_tab_changed(self, index):
-        """Срабатывает при переключении вкладки"""
-        if index < 0:
-            return
-        
-        widget = self.tab_widget.widget(index)
-        if not widget:
-            return
-        
-        # Проверяем, есть ли таблица
-        table = widget.findChild(QTableWidget)
-        if table and table.rowCount() > 0:
-            # Применяем настройки видимости без перезагрузки
-            self.apply_password_visibility(table)
-            return
-        
-        # Если это вкладка секрета, но таблица пустая
-        label = widget.findChild(QLabel)
-        if label and "Секрет:" in label.text():
-            path = label.text().replace("<b>Секрет:</b> ", "").strip()
-            if path and table and table.rowCount() == 0:
-                # Загружаем содержимое
-                self.refresh_secret_tab_content(widget, path)
+    def _create_empty_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        label = QLabel("Выберите каталог или секрет в дереве слева")
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet("color: #777; font-size: 14px;")
+        layout.addWidget(label)
+        return page
 
-    def apply_password_visibility(self, table):
-        """Применяет настройки видимости паролей к таблице"""
-        if not table:
-            self.debug_log("DEBUG: table is None")
-            return
-        
-        show = getattr(self, 'show_passwords', False)
-        self.debug_log(f"DEBUG: apply_password_visibility, show={show}, rows={table.rowCount()}")
-        
-        for row in range(table.rowCount()):
-            # Проверяем колонку 1 (значение)
-            item = table.item(row, 1)
-            if not item:
-                continue
-            
-            # Проверяем, что это не папка
-            type_item = table.item(row, 2)
-            if type_item and "📁" in type_item.text():
-                continue
-            
-            # Получаем реальное значение
-            real_value = item.data(Qt.UserRole + 1)
-            self.debug_log(f"DEBUG: row {row}, real_value type: {type(real_value)}, value: {str(real_value)[:30]}")
-            
-            if not real_value:
-                # Если реальное значение не сохранено, пробуем другие варианты
-                real_value = item.data(Qt.UserRole)
-                if real_value == "hidden" or real_value == "visible":
-                    # Это не значение, а флаг
-                    real_value = item.text()
-                    # Если это маскированный текст, пропускаем
-                    if real_value and (real_value.startswith("•") or real_value == "(пусто)"):
-                        continue
-            
-            if real_value:
-                # Создаём новый item с правильной видимостью
-                new_item = self.create_password_item(real_value, show)
-                # Сохраняем реальное значение
-                new_item.setData(Qt.UserRole + 1, real_value)
-                table.setItem(row, 1, new_item)
-        
-        self.debug_log("DEBUG: apply_password_visibility done")
+    def _create_directory_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(10, 10, 10, 10)
 
-    def on_tree_selection_changed(self):
-        """При выделении элемента в дереве - переключаемся на вкладку или открываем новую"""
-        current_item = self.tree.currentItem()
-        if not current_item:
+        self.dir_path_label = QLabel("📂 /")
+        self.dir_path_label.setStyleSheet(
+            "padding: 6px; background: #f8f9fa; border-radius: 4px;"
+        )
+        self.dir_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.dir_path_label)
+
+        self.dir_table = QTableWidget()
+        self.dir_table.setColumnCount(4)
+        self.dir_table.setHorizontalHeaderLabels(["Имя", "Значение", "Тип", ""])
+        self._configure_table(self.dir_table)
+        self.dir_table.itemDoubleClicked.connect(self.on_table_double_click)
+        self.dir_table.itemSelectionChanged.connect(
+            lambda: self.on_table_selection_changed(self.dir_table)
+        )
+        self.dir_table.cellClicked.connect(
+            lambda row, col: self._on_table_cell_clicked(
+                self.dir_table, row, col, eye_column=3
+            )
+        )
+        self.dir_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.dir_table.customContextMenuRequested.connect(
+            self._show_directory_context_menu
+        )
+
+        header = self.dir_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.Fixed)
+        self.dir_table.setColumnWidth(3, 34)
+
+        layout.addWidget(self.dir_table)
+        return page
+
+    def _create_secret_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        header_layout = QHBoxLayout()
+
+        self.secret_info_label = QLabel("<b>Секрет:</b> ")
+        self.secret_info_label.setStyleSheet(
+            "padding: 6px; background: #f8f9fa; border-radius: 4px;"
+        )
+        self.secret_info_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.secret_info_label.setWordWrap(True)
+        header_layout.addWidget(self.secret_info_label, 1)
+
+        copy_path_btn = QPushButton("📋 Путь")
+        copy_path_btn.setToolTip("Скопировать путь секрета")
+        copy_path_btn.clicked.connect(
+            lambda: self.copy_to_clipboard(self._secret_path or "")
+        )
+        header_layout.addWidget(copy_path_btn)
+
+        edit_btn = QPushButton("✏️ Изменить")
+        edit_btn.clicked.connect(
+            lambda: self.edit_secret(self._secret_path)
+        )
+        header_layout.addWidget(edit_btn)
+
+        layout.addLayout(header_layout)
+
+        self.secret_table = QTableWidget()
+        self.secret_table.setColumnCount(3)
+        self.secret_table.setHorizontalHeaderLabels(["Ключ", "Значение", ""])
+        self._configure_table(self.secret_table)
+        self.secret_table.itemDoubleClicked.connect(self.on_table_double_click)
+        self.secret_table.cellClicked.connect(
+            lambda row, col: self._on_table_cell_clicked(
+                self.secret_table, row, col, eye_column=2
+            )
+        )
+        self.secret_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.secret_table.customContextMenuRequested.connect(
+            self._show_secret_context_menu
+        )
+
+        header = self.secret_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        self.secret_table.setColumnWidth(2, 34)
+
+        layout.addWidget(self.secret_table)
+
+        copy_btn = QPushButton("📋 Скопировать всё")
+        copy_btn.clicked.connect(
+            lambda: self.copy_secret_data(self._secret_data)
+        )
+        copy_btn.setStyleSheet(
+            """
+            QPushButton {
+                padding: 8px;
+                background: #0078d4;
+                color: white;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background: #005a9e; }
+            """
+        )
+        layout.addWidget(copy_btn)
+        return page
+
+    @staticmethod
+    def _configure_table(table: QTableWidget):
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+
+    # ------------------------------------------------------------------
+    # Подключение
+    # ------------------------------------------------------------------
+    def _load_config(self):
+        config = self.config_manager.load_config()
+        if not config:
             return
-        
-        path = current_item.data(0, Qt.UserRole)
-        if not path:
+
+        try:
+            self._connect_to_vault(
+                config["url"],
+                config["token"],
+                config.get("mount_point", "secret"),
+                save=False,
+            )
+        except Exception as e:
+            self.status_label.setText(f"❌ Ошибка: {e}")
+
+    def _connect_to_vault(self, url, token, mount_point, save=True):
+        client = VaultClient(url, token, mount_point)
+        self.client = client
+        self._invalidate_cache()
+        self._active_path = ""
+
+        if save:
+            self.config_manager.save_config(url, token, mount_point)
+
+        self.status_label.setText(f"✅ Подключено к {url}")
+        self.refresh(silent=True)
+
+    def show_config_dialog(self):
+        dialog = ConfigDialog(self)
+        if not dialog.exec():
             return
-        
-        # Сначала пытаемся переключиться на существующую вкладку
-        if self.switch_to_tab(path):
-            return  # Уже открыта - просто переключились
-        
-        # Если вкладки нет - создаём новую
-        if path.endswith('/'):
-            display_name = path.rstrip('/').split('/')[-1]
-            if not display_name:
-                display_name = "/"
-            self.add_tab(path, display_name)
+
+        url, token, mount = dialog.get_config()
+        try:
+            self._connect_to_vault(url, token, mount)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", str(e))
+
+    # ------------------------------------------------------------------
+    # Дерево
+    # ------------------------------------------------------------------
+    def refresh(self, silent=False):
+        """Перестраивает дерево и обновляет активную правую панель."""
+        if not self.client:
+            if not silent:
+                QMessageBox.warning(
+                    self, "Ошибка", "Сначала подключитесь к Vault"
+                )
+            return
+
+        active_path = self._active_path
+        expanded_paths = self._expanded_tree_paths()
+
+        self._invalidate_cache()
+        self.tree.clear()
+
+        root = QTreeWidgetItem(self.tree)
+        root.setText(0, "📁 /")
+        root.setData(0, Qt.UserRole, "")
+        root.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+        self._populate_tree(root, "", show_errors=not silent)
+        root.setExpanded(True)
+        self._restore_expanded_paths(expanded_paths)
+
+        item = self._ensure_tree_item(active_path) if active_path else root
+        if item is None:
+            item = root
+
+        # После clear() текущего элемента нет, поэтому setCurrentItem()
+        # вызовет currentItemChanged и правую панель обновит сигнал.
+        if self.tree.currentItem() is item:
+            self._show_tree_item(item)
         else:
-            display_name = path.split('/')[-1]
-            self.add_secret_tab(path, display_name)
+            self.tree.setCurrentItem(item)
+        self.tree.scrollToItem(item)
 
-    def switch_to_tab(self, path):
-        """Переключает на существующую вкладку с указанным путём.
-        Возвращает True если вкладка найдена и переключена.
-        """
-        for i in range(self.tab_widget.count()):
-            widget = self.tab_widget.widget(i)
-            if not widget:
-                continue
-            
-            # Ищем таблицу во вкладке
-            table = widget.findChild(QTableWidget)
-            if table:
-                tab_path = table.property("vault_path")
-                if tab_path == path:
-                    self.tab_widget.setCurrentIndex(i)
-                    return True
-            
-            # Если это вкладка секрета, проверяем по тексту
-            tab_text = self.tab_widget.tabText(i)
-            if "📄" in tab_text and path.split('/')[-1] in tab_text:
-                # Дополнительная проверка через содержимое
-                label = widget.findChild(QLabel)
-                if label and path in label.text():
-                    self.tab_widget.setCurrentIndex(i)
-                    return True
-        
-        return False
+        if not silent:
+            self.status_label.setText("🔄 Обновлено")
+
+    def _expanded_tree_paths(self):
+        paths = set()
+
+        def walk(item):
+            for i in range(item.childCount()):
+                child = item.child(i)
+                path = child.data(0, Qt.UserRole)
+                if child.isExpanded() and path:
+                    paths.add(path)
+                walk(child)
+
+        root = self.tree.topLevelItem(0)
+        if root:
+            walk(root)
+        return paths
+
+    def _ensure_tree_item(self, path):
+        """Находит элемент дерева по пути, при необходимости раскрывая папки."""
+        root = self.tree.topLevelItem(0)
+        if root is None:
+            return None
+
+        is_folder = path == "" or path.endswith("/")
+        segments = [segment for segment in path.split("/") if segment]
+        if not segments:
+            return root
+
+        current = root
+        current_path = ""
+        for index, segment in enumerate(segments):
+            is_last = index == len(segments) - 1
+            next_path = f"{current_path}{segment}"
+            if not is_last or is_folder:
+                next_path += "/"
+
+            if current.childCount() == 0:
+                self._populate_tree(current, current_path, show_errors=False)
+
+            current = self._find_tree_child(current, next_path)
+            if current is None:
+                return None
+            current_path = next_path
+
+        return current
+
+    @staticmethod
+    def _find_tree_child(parent, path):
+        for i in range(parent.childCount()):
+            child = parent.child(i)
+            if child.data(0, Qt.UserRole) == path:
+                return child
+        return None
+
+    def _restore_expanded_paths(self, paths):
+        for path in sorted(paths, key=lambda p: p.count("/")):
+            item = self._ensure_tree_item(path)
+            if item:
+                item.setExpanded(True)
+
+    def _populate_tree(self, parent_item, path, show_errors=True):
+        try:
+            items = self.client.list_secrets(path)
+        except Exception as e:
+            if show_errors:
+                QMessageBox.warning(
+                    self, "Ошибка", f"Не удалось загрузить {path or '/'}: {e}"
+                )
+            return
+
+        for item in items:
+            child = QTreeWidgetItem(parent_item)
+
+            if item.endswith("/"):
+                child.setText(0, f"📁 {item[:-1]}")
+                child.setData(0, Qt.UserRole, f"{path}{item}")
+                child.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+                child.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+            else:
+                child.setText(0, f"🔐 {item}")
+                child.setData(0, Qt.UserRole, f"{path}{item}")
+                child.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
 
     def on_tree_expanded(self, item):
-        """Загружаем дочерние элементы при раскрытии папки"""
-        # Проверяем, есть ли уже дочерние элементы
+        """Лениво загружаем дочерние элементы при раскрытии папки."""
         if item.childCount() > 0:
-            # Если есть - значит уже загружены
             return
-        
+
         path = item.data(0, Qt.UserRole)
-        if not path or not path.endswith('/'):
+        if path is None or not path.endswith("/"):
             return
-        
-        # Загружаем содержимое папки
+
         self._populate_tree(item, path)
 
-    def add_tab(self, path, display_name):
-        """Создаёт новую вкладку для каталога"""
-        tab_widget = QWidget()
-        tab_layout = QVBoxLayout(tab_widget)
-        tab_layout.setContentsMargins(5, 5, 5, 5)
-        
-        # Создаём таблицу для этой вкладки
-        table = QTableWidget()
-        table.setColumnCount(3)
-        table.setHorizontalHeaderLabels(["Ключ/Путь", "Значение", "Тип"])
-        table.horizontalHeader().setStretchLastSection(True)
-        table.itemDoubleClicked.connect(self.on_table_double_click)
-        
-        # Сохраняем путь в таблицу
-        table.setProperty("vault_path", path)
-        
-        tab_layout.addWidget(table)
-        
-        # Добавляем вкладку
-        index = self.tab_widget.addTab(tab_widget, display_name)
-        self.tab_widget.setCurrentIndex(index)
-        
-        # Загружаем содержимое
-        self.load_tab_content(table, path)
-
-    def close_tab(self, index):
-        """Закрывает вкладку"""
-        if self.tab_widget.count() > 1:
-            self.tab_widget.removeTab(index)
-        else:
-            # Не даём закрыть последнюю вкладку
-            QMessageBox.information(self, "Информация", "Нельзя закрыть последнюю вкладку")
-
-    def load_tab_content(self, table, path):
-        """Загружает содержимое каталога в таблицу"""
-        if not self.client:
+    def on_tree_current_changed(self, current, _previous):
+        if current is None:
             return
-        
-        try:
-            items = self.client.list_secrets(path)
-            table.setRowCount(0)
-            show_passwords = getattr(self, 'show_passwords', False)
-            
-            for item in items:
-                row = table.rowCount()
-                table.insertRow(row)
-                
-                is_folder = item.endswith('/')
-                display_name = item[:-1] if is_folder else item
-                full_path = f"{path}{item}"
-                
-                # Колонка 0: Имя
-                name_item = QTableWidgetItem(display_name)
-                name_item.setData(Qt.UserRole, full_path)
-                
-                if is_folder:
-                    font = name_item.font()
-                    font.setBold(True)
-                    name_item.setFont(font)
-                    name_item.setForeground(Qt.blue)
-                    table.setItem(row, 0, name_item)
-                    table.setItem(row, 1, QTableWidgetItem("📂 Папка"))
-                    table.setItem(row, 2, QTableWidgetItem("📁"))
-                else:
-                    table.setItem(row, 0, name_item)
-                    
-                    # Пытаемся прочитать секрет
-                    try:
-                        data = self.client.read_secret(full_path)
-                        if data:
-                            first_value = list(data.values())[0] if data else "(пусто)"
-                            password_item = self.create_password_item(first_value, show_passwords)
-                            # Сохраняем реальное значение
-                            password_item.setData(Qt.UserRole + 1, str(first_value))
-                            table.setItem(row, 1, password_item)
-                        else:
-                            table.setItem(row, 1, QTableWidgetItem("(пусто)"))
-                    except Exception as e:
-                        table.setItem(row, 1, QTableWidgetItem("🔒 Ошибка"))
-                    
-                    table.setItem(row, 2, QTableWidgetItem("🔐"))
-            
-            # Подгоняем ширину колонок
-            table.resizeColumnsToContents()
-            table.horizontalHeader().setStretchLastSection(True)
-            
-        except Exception as e:
-            QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить {path}: {e}")
+        self._show_tree_item(current)
 
-    def on_table_double_click(self, item):
-        """Обработка двойного клика по таблице во вкладке"""
-        table = item.tableWidget()
-        
-        if not item or item.row() < 0:
-            return
-
-        # Если кликнули по колонке с паролем (колонка 1) - копируем
-        if item.column() == 1:
-            # Проверяем, что это не папка
-            type_item = table.item(item.row(), 2)
-            if type_item and "📁" not in type_item.text():
-                # Получаем реальное значение
-                real_value = item.data(Qt.UserRole + 1)
-                if real_value:
-                    self.copy_to_clipboard(real_value)
-                    return
-            
-        name_item = table.item(item.row(), 0)
-        if not name_item:
-            return
-        
-        path = name_item.data(Qt.UserRole)
-        if not path:
-            return
-        
-        # Проверяем тип элемента (колонка 1)
-        type_item = table.item(item.row(), 1)
-        is_folder = type_item and ("Папка" in type_item.text() or "📂" in type_item.text())
-        
-        if is_folder:
-            # Это папка
-            folder_name = path.rstrip('/').split('/')[-1]
-            if not folder_name:
-                folder_name = "/"
-            
-            # Проверяем, не открыта ли уже эта вкладка
-            if not self.switch_to_tab(path):
-                self.add_tab(path, folder_name)
-        else:
-            # Это секрет
-            secret_name = path.split('/')[-1]
-            if not self.switch_to_tab(path):
-                self.add_secret_tab(path, secret_name)
-
-    def load_secret_value(self, table, path, row):
-        """Загружает значение секрета в таблицу"""
-        if not self.client:
-            return
-        
-        try:
-            data = self.client.read_secret(path)
-            
-            if not data:
-                table.setItem(row, 1, QTableWidgetItem("(пусто)"))
-                return
-            
-            show_passwords = getattr(self, 'show_passwords', False)
-            
-            keys = list(data.keys())
-            if keys:
-                first_key = keys[0]
-                first_value = str(data[first_key])
-                
-                # 🔥 Используем маскирование для пароля
-                password_item = self.create_password_item(first_value, show_passwords)
-                table.setItem(row, 0, QTableWidgetItem(first_key))
-                table.setItem(row, 1, password_item)
-                table.setItem(row, 2, QTableWidgetItem("🔑"))
-                
-                # Добавляем остальные ключи
-                for extra_key in keys[1:]:
-                    new_row = table.rowCount()
-                    table.insertRow(new_row)
-                    table.setItem(new_row, 0, QTableWidgetItem(extra_key))
-                    
-                    extra_value = str(data[extra_key])
-                    extra_item = self.create_password_item(extra_value, show_passwords)
-                    table.setItem(new_row, 1, extra_item)
-                    table.setItem(new_row, 2, QTableWidgetItem("🔑"))
-        
-        except Exception as e:
-            QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить секрет: {e}")
-
-    def _load_config(self):
-        """Загружаем сохранённый конфиг и подключаемся"""
-        config = self.config_manager.load_config()
-        if config:
-            try:
-                self.client = VaultClient(
-                    url=config["url"],
-                    token=config["token"],
-                    mount_point=config.get("mount_point", "secret")
-                )
-                self.status_label.setText(f"✅ Подключено к {config['url']}")
-                self.refresh()
-            except Exception as e:
-                self.status_label.setText(f"❌ Ошибка: {e}")
-    
-    def show_config_dialog(self):
-        """Показываем диалог настройки"""
-        dialog = ConfigDialog(self)
-        if dialog.exec():
-            url, token, mount = dialog.get_config()
-            try:
-                self.client = VaultClient(url, token, mount)
-                self.config_manager.save_config(url, token, mount)
-                self.status_label.setText(f"✅ Подключено к {url}")
-                self.refresh()
-            except Exception as e:
-                QMessageBox.critical(self, "Ошибка", str(e))
-    
-    def refresh(self):
-        """Обновляем дерево папок"""
-        if not self.client:
-            QMessageBox.warning(self, "Ошибка", "Сначала подключитесь к Vault")
-            return
-        
-        self.tree.clear()
-        root = QTreeWidgetItem(self.tree)
-        root.setText(0, "/")
-        self._populate_tree(root, "")
-        root.setExpanded(True)
-    
-    def _populate_tree(self, parent_item, path):
-        """Рекурсивно заполняем дерево"""
-        try:
-            items = self.client.list_secrets(path)
-            for item in items:
-                child = QTreeWidgetItem(parent_item)
-                
-                # Если это папка (заканчивается на /)
-                if item.endswith('/'):
-                    display_name = item[:-1]  # Убираем слеш
-                    child.setText(0, f"📁 {display_name}")
-                    child.setData(0, Qt.UserRole, f"{path}{item}")
-                    child.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
-                    # Раскрываем папки с иконкой (но не загружаем содержимое сразу)
-                    child.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
-                else:
-                    # Это секрет
-                    child.setText(0, f"🔐 {item}")
-                    child.setData(0, Qt.UserRole, f"{path}{item}")
-                    child.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
-                    
-                    # Попробуем прочитать секрет для предпросмотра
-                    try:
-                        data = self.client.read_secret(f"{path}{item}")
-                        if data:
-                            preview = list(data.values())[0] if data else ""
-                            if len(str(preview)) > 30:
-                                preview = str(preview)[:30] + "..."
-                            child.setText(1, preview)
-                    except:
-                        pass  # Молча пропускаем ошибки при предпросмотре
-        
-        except Exception as e:
-            QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить {path}: {e}")
-    
-    def on_tree_click(self, item, _column=None):
-        """При клике на элемент дерева"""
+    def _show_tree_item(self, item):
         path = item.data(0, Qt.UserRole)
-        if not path:
+        if path is None:
             return
-        
-        if path.endswith('/'):  # Это папка
-            # Открываем в новой вкладке
-            display_name = item.text(0).replace("📁 ", "")
-            if not display_name:
-                display_name = "/"
-            self.add_tab(path, display_name)
-        else:  # Это секрет
-            # Открываем в новой вкладке с содержимым секрета
-            display_name = item.text(0).replace("🔐 ", "")
-            self.add_secret_tab(path, display_name)
-    
-    def add_secret_tab(self, path, display_name):
-        """Создаёт вкладку с содержимым секрета"""
-        if not self.client:
+
+        self._active_path = path
+        if path == "" or path.endswith("/"):
+            self.show_directory(path)
+        else:
+            self.show_secret(path)
+
+    # ------------------------------------------------------------------
+    # Навигация
+    # ------------------------------------------------------------------
+    def open_directory(self, path):
+        self._navigate_to(path)
+
+    def open_secret(self, path):
+        self._navigate_to(path)
+
+    def _navigate_to(self, path):
+        item = self._ensure_tree_item(path)
+        if item is None:
+            self._active_path = path
+            if path == "" or path.endswith("/"):
+                self.show_directory(path)
+            else:
+                self.show_secret(path)
             return
-        
+
+        if self.tree.currentItem() is item:
+            self._show_tree_item(item)
+        else:
+            self.tree.setCurrentItem(item)
+        self.tree.scrollToItem(item)
+
+    # ------------------------------------------------------------------
+    # Правая панель
+    # ------------------------------------------------------------------
+    def show_directory(self, path):
+        self._active_path = path
+        self._directory_path = path
+        self.dir_path_label.setText(f"📂 {path or '/'}")
+        self.content_stack.setCurrentWidget(self.directory_page)
+        self.load_directory(path)
+        self._update_delete_action()
+
+    def show_secret(self, path):
         try:
-            data = self.client.read_secret(path)
-            
-            tab_widget = QWidget()
-            tab_layout = QVBoxLayout(tab_widget)
-            tab_layout.setContentsMargins(10, 10, 10, 10)
-            
-            # Информация о секрете
-            info_label = QLabel(f"<b>Секрет:</b> {path}")
-            info_label.setStyleSheet("padding: 5px; background: #f8f9fa; border-radius: 4px;")
-            info_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            info_label.setWordWrap(True)
-            tab_layout.addWidget(info_label)
-            
-            # Кнопка копирования пути
-            copy_path_btn = QPushButton("📋 Скопировать путь")
-            copy_path_btn.clicked.connect(lambda: self.copy_to_clipboard(path))
-            copy_path_btn.setStyleSheet("""
-                QPushButton {
-                    padding: 5px 15px;
-                    background: #f0f0f0;
-                    border: 1px solid #ccc;
-                    border-radius: 4px;
-                }
-                QPushButton:hover {
-                    background: #e0e0e0;
-                }
-            """)
-            tab_layout.addWidget(copy_path_btn)
-            
-            # Таблица с ключами-значениями
-            table = QTableWidget()
-            table.setColumnCount(2)
-            table.setHorizontalHeaderLabels(["Ключ", "Значение"])
-            table.horizontalHeader().setStretchLastSection(True)
-            table.setProperty("vault_path", path)
-            
-            show_passwords = getattr(self, 'show_passwords', False)
-            
-            table.setRowCount(len(data))
-            for i, (key, value) in enumerate(data.items()):
-                table.setItem(i, 0, QTableWidgetItem(key))
-                value_item = self.create_password_item(str(value), show_passwords)
-                table.setItem(i, 1, value_item)
-            
-            # Кнопка копирования всего секрета
-            copy_btn = QPushButton("📋 Скопировать всё")
-            copy_btn.clicked.connect(lambda: self.copy_secret_data(data))
-            copy_btn.setStyleSheet("""
-                QPushButton {
-                    padding: 8px;
-                    background: #0078d4;
-                    color: white;
-                    border: none;
-                    border-radius: 4px;
-                }
-                QPushButton:hover {
-                    background: #005a9e;
-                }
-            """)
-            
-            tab_layout.addWidget(copy_btn)
-            tab_layout.addWidget(table)
-            
-            # Подгоняем ширину колонок
-            table.resizeColumnsToContents()
-            table.horizontalHeader().setStretchLastSection(True)
-            
-            index = self.tab_widget.addTab(tab_widget, f"📄 {display_name}")
-            self.tab_widget.setCurrentIndex(index)
-            
+            data = self._get_secret(path)
         except Exception as e:
-            QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить секрет: {e}")
+            QMessageBox.warning(
+                self, "Ошибка", f"Не удалось загрузить секрет: {e}"
+            )
+            return
 
-    def copy_to_clipboard(self, text):
-        """Копирует текст в буфер обмена"""
-        clipboard = QApplication.clipboard()
-        clipboard.setText(text)
-        self.status_label.setText(f"📋 Скопировано: {text[:50]}...")
+        self._active_path = path
+        self._secret_path = path
+        self._secret_data = data
+        self.secret_info_label.setText(
+            f"<b>Секрет:</b> {html.escape(path)}"
+        )
+        self._fill_secret_table(self.secret_table, data)
+        self.content_stack.setCurrentWidget(self.secret_page)
+        self._update_delete_action()
 
-    def copy_secret_data(self, data):
-        """Копирует все данные секрета в буфер обмена"""
-        clipboard = QApplication.clipboard()
-        text = "\n".join([f"{k}: {v}" for k, v in data.items()])
-        clipboard.setText(text)
-        self.status_label.setText("📋 Все данные скопированы")
-
-    def _show_folder(self, path):
-        """Показываем содержимое папки"""
+    def load_directory(self, path):
         if not self.client:
             return
-        
+
         try:
             items = self.client.list_secrets(path)
-            self.table.setRowCount(0)
-            for item in items:
-                row = self.table.rowCount()
-                self.table.insertRow(row)
-                self.table.setItem(row, 0, QTableWidgetItem(item))
         except Exception as e:
-            QMessageBox.warning(self, "Ошибка", str(e))
-    
-    def _show_secret(self, path):
-        """Показываем содержимое секрета"""
-        if not self.client:
+            QMessageBox.warning(
+                self, "Ошибка", f"Не удалось загрузить {path or '/'}: {e}"
+            )
             return
-        
-        try:
-            data = self.client.read_secret(path)
-            self.table.setRowCount(0)
-            for key, value in data.items():
-                row = self.table.rowCount()
-                self.table.insertRow(row)
-                self.table.setItem(row, 0, QTableWidgetItem(key))
-                self.table.setItem(row, 1, QTableWidgetItem(str(value)))
-        except Exception as e:
-            QMessageBox.warning(self, "Ошибка", str(e))
-    
-    def create_secret(self):
-        """Создать новый секрет"""
-        if not self.client:
-            QMessageBox.warning(self, "Ошибка", "Сначала подключитесь")
-            return
-        
-        dialog = SecretDialog(self)  # Теперь работает
-        if dialog.exec():
-            path, data = dialog.get_secret()
-            if not path or not data:
-                QMessageBox.warning(self, "Ошибка", "Путь и данные не могут быть пустыми")
-                return
-            
-            try:
-                # Проверяем, существует ли секрет
-                existing = self.client.read_secret(path)
-                if existing:
-                    # Секрет существует - спрашиваем
-                    reply = QMessageBox.question(
-                        self, 
-                        "Секрет уже существует",
-                        f"Секрет '{path}' уже существует.\n\n"
-                        "Хотите перезаписать его?",
-                        QMessageBox.Yes | QMessageBox.No,
-                        QMessageBox.No
-                    )
-                    if reply == QMessageBox.No:
-                        self.status_label.setText("⏹️ Создание отменено")
-                        return
-                
-                # Создаём или обновляем секрет
-                self.client.create_secret(path, data)
-                self.refresh()
-                self.status_label.setText(f"✅ {'Обновлён' if existing else 'Создан'} секрет: {path}")
-                
-                # Открываем созданный секрет во вкладке
-                secret_name = path.split('/')[-1]
-                self.add_secret_tab(path, secret_name)
-                
-            except Exception as e:
-                QMessageBox.critical(self, "Ошибка", str(e))
-    
-    def delete_secret(self):
-        """Удалить выбранный секрет"""
-        # Получаем текущую вкладку
-        current_tab = self.tab_widget.currentWidget()
-        if not current_tab:
-            return
-        
-        # Ищем таблицу в текущей вкладке
-        table = current_tab.findChild(QTableWidget)
-        if not table:
-            QMessageBox.warning(self, "Ошибка", "Нет активной таблицы")
-            return
-        
-        # Получаем выбранную строку
-        current_row = table.currentRow()
-        if current_row < 0:
-            QMessageBox.warning(self, "Ошибка", "Выберите секрет для удаления")
-            return
-        
-        # Получаем путь из первой колонки
-        path_item = table.item(current_row, 0)
-        if not path_item:
-            return
-        
-        # Проверяем, что это секрет (не папка)
-        type_item = table.item(current_row, 2)
-        if type_item and "Папка" in type_item.text():
-            QMessageBox.warning(self, "Ошибка", "Нельзя удалить папку через эту кнопку")
-            return
-        
-        # Получаем полный путь
-        full_path = path_item.data(Qt.UserRole)
-        if not full_path:
-            # Если путь не сохранён, пытаемся собрать из контекста
-            tab_path = table.property("vault_path") or ""
-            secret_name = path_item.text()
-            full_path = f"{tab_path}{secret_name}"
-        
-        # Подтверждение удаления
-        reply = QMessageBox.question(
-            self, "Подтверждение",
-            f"Удалить секрет '{full_path}'?",
-            QMessageBox.Yes | QMessageBox.No
+
+        prefix = (path or "").rstrip("/")
+        prefix = f"{prefix}/" if prefix else ""
+
+        table = self.dir_table
+        table.setUpdatesEnabled(False)
+        table.setRowCount(0)
+        table.clearSelection()
+
+        for item in items:
+            row = table.rowCount()
+            table.insertRow(row)
+
+            is_folder = item.endswith("/")
+            display_name = item[:-1] if is_folder else item
+            full_path = f"{prefix}{item}"
+
+            name_item = QTableWidgetItem(
+                f"{'📁' if is_folder else '🔐'} {display_name}"
+            )
+            name_item.setData(Qt.UserRole, full_path)
+            if is_folder:
+                name_item.setForeground(QColor(Qt.blue))
+                table.setItem(row, 0, name_item)
+                table.setItem(row, 1, QTableWidgetItem("📂 Папка"))
+                table.setItem(row, 2, QTableWidgetItem("📁"))
+                table.setItem(row, 3, QTableWidgetItem(""))
+            else:
+                table.setItem(row, 0, name_item)
+                table.setItem(row, 1, QTableWidgetItem("—"))
+                table.setItem(row, 2, QTableWidgetItem("🔐"))
+                table.setItem(row, 3, self._create_eye_item(visible=False))
+
+        table.setUpdatesEnabled(True)
+
+        # В небольших каталогах сразу показываем первые значения.
+        # В больших — читаем только выбранную строку, чтобы не делать N+1.
+        if len(items) <= self.PREVIEW_LIMIT:
+            for row in range(table.rowCount()):
+                self._load_row_value(table, row)
+
+    def _fill_secret_table(self, table, data):
+        table.setUpdatesEnabled(False)
+        table.setRowCount(len(data))
+
+        for row, (key, value) in enumerate(data.items()):
+            key_item = QTableWidgetItem(str(key))
+            key_item.setData(Qt.UserRole, str(key))
+            table.setItem(row, 0, key_item)
+
+            value_item = self.create_password_item(str(value), show=False)
+            table.setItem(row, 1, value_item)
+            table.setItem(row, 2, self._create_eye_item(visible=False))
+
+        table.setUpdatesEnabled(True)
+
+    def _create_eye_item(self, visible: bool) -> QTableWidgetItem:
+        item = QTableWidgetItem()
+        item.setData(Qt.UserRole, visible)
+        item.setTextAlignment(Qt.AlignCenter)
+        item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        self._update_eye_item(item, visible)
+        return item
+
+    def _update_eye_item(self, item: QTableWidgetItem, visible: bool):
+        item.setIcon(self._eye_icon_visible if visible else self._eye_icon_hidden)
+        item.setToolTip(
+            "Скрыть значение" if visible else "Показать значение"
         )
-        
-        if reply == QMessageBox.Yes:
-            try:
-                self.client.delete_secret(full_path)
-                # Обновляем текущую вкладку
-                self.load_tab_content(table, table.property("vault_path") or "")
-                self.status_label.setText(f"🗑️ Удалён: {full_path}")
-            except Exception as e:
-                QMessageBox.critical(self, "Ошибка", str(e))
+        item.setData(Qt.UserRole, visible)
 
-    def toggle_passwords_visibility(self, checked):
-        """Переключает отображение паролей в текущей вкладке"""
-        if checked:
-            self.btn_toggle_passwords.setText("🙈 Скрыть пароли")
-            self.show_passwords = True
+    def _on_table_cell_clicked(self, table, row, column, eye_column):
+        if column != eye_column:
+            return
+        if table is self.dir_table and self._is_folder_row(table, row):
+            return
+        self._toggle_row_visibility(table, row, eye_column)
+
+    def _toggle_row_visibility(self, table, row, eye_column):
+        value_item = table.item(row, 1)
+        if value_item is None:
+            return
+
+        real_value = value_item.data(Qt.UserRole + 1)
+        if real_value is None:
+            if table is self.dir_table:
+                self._load_row_value(table, row)
+                value_item = table.item(row, 1)
+                if value_item is None:
+                    return
+                real_value = value_item.data(Qt.UserRole + 1)
+            if real_value is None:
+                return
+
+        visible = value_item.data(Qt.UserRole) != "visible"
+        new_item = self.create_password_item(real_value, show=visible)
+        table.setItem(row, 1, new_item)
+
+        eye_item = table.item(row, eye_column)
+        if eye_item is None:
+            eye_item = self._create_eye_item(visible)
+            table.setItem(row, eye_column, eye_item)
         else:
-            self.btn_toggle_passwords.setText("👁️ Показать пароли")
-            self.show_passwords = False
-        
-        # Получаем текущую вкладку
-        current_widget = self.tab_widget.currentWidget()
-        if not current_widget:
-            return
-        
-        # Ищем таблицу
-        table = current_widget.findChild(QTableWidget)
-        if not table:
-            return
-        
-        # Применяем видимость без перезагрузки
-        self.apply_password_visibility(table)
+            self._update_eye_item(eye_item, visible)
 
-    def create_password_item(self, value, show_password=False):
-        """Создаёт QTableWidgetItem с маскированным или открытым паролем"""
+    @staticmethod
+    def _is_folder_row(table, row) -> bool:
+        type_item = table.item(row, 2)
+        return bool(type_item and "📁" in type_item.text())
+
+    def _load_row_value(self, table, row, force=False) -> bool:
+        name_item = table.item(row, 0)
+        if not name_item:
+            return False
+        path = name_item.data(Qt.UserRole)
+        if not path or self._is_folder_row(table, row):
+            return False
+
+        try:
+            data = self._get_secret(path, force=force)
+        except Exception as e:
+            self.debug_log(f"Не удалось прочитать {path}: {e}")
+            table.setItem(row, 1, QTableWidgetItem("🔒 Ошибка"))
+            return False
+
+        first_value = next(iter(data.values()), "")
+        table.setItem(row, 1, self.create_password_item(first_value, show=False))
+
+        eye_item = table.item(row, 3)
+        if eye_item:
+            self._update_eye_item(eye_item, False)
+        return True
+
+    def on_table_selection_changed(self, table):
+        if table is not self.dir_table:
+            return
+
+        self._update_delete_action()
+
+        row = table.currentRow()
+        if row < 0:
+            return
+
+        value_item = table.item(row, 1)
+        if value_item and value_item.data(Qt.UserRole) in ("hidden", "visible"):
+            return
+        if value_item and value_item.text() in ("📂 Папка", "🔒 Ошибка"):
+            return
+
+        self._load_row_value(table, row)
+
+    def create_password_item(self, value, show=False):
         item = QTableWidgetItem()
         str_value = str(value) if value is not None else ""
-        
-        # Сохраняем реальное значение всегда
         item.setData(Qt.UserRole + 1, str_value)
-        
-        if show_password:
-            # Показываем пароль открыто
+
+        if show:
             item.setText(str_value if str_value else "(пусто)")
             item.setData(Qt.UserRole, "visible")
         else:
-            # Маскируем пароль
-            if str_value and len(str_value) > 0:
-                masked = "•" * min(len(str_value), 20)
-                if len(str_value) > 20:
-                    masked += "…"
-                item.setText(masked)
-            else:
-                item.setText("(пусто)")
+            # Фиксированное число точек: не показываем длину значения
+            # и не добавляем «…» после упора в лимит.
+            item.setText("•" * self.MASK_CHARS if str_value else "(пусто)")
             item.setData(Qt.UserRole, "hidden")
-        
-        # Делаем ячейку нередактируемой
+
         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-        
         return item
-    
-    def refresh_current_tab(self):
-        """Обновляет только текущую вкладку"""
-        self.debug_log("DEBUG: refresh_current_tab called")
-        current_widget = self.tab_widget.currentWidget()
-        if not current_widget:
-            self.debug_log("DEBUG: no current widget")
-            return
-        
-        # Ищем таблицу
-        table = current_widget.findChild(QTableWidget)
-        if not table:
-            self.debug_log("DEBUG: no table found")
-            return
-        
-        path = table.property("vault_path")
-        self.debug_log(f"DEBUG: path = {path}")
-        
-        if path is None:
-            # Проверяем, может это вкладка секрета
-            label = current_widget.findChild(QLabel)
-            if label and "Секрет:" in label.text():
-                path = label.text().replace("<b>Секрет:</b> ", "").strip()
-                self.debug_log(f"DEBUG: secret path from label = {path}")
-                if path:
-                    self.refresh_secret_tab_content(current_widget, path)
-                    return
-        
-        if path is not None:
-            # Сохраняем позицию прокрутки
-            scroll_pos = 0
-            if table.verticalScrollBar():
-                scroll_pos = table.verticalScrollBar().value()
-            
-            # Перезагружаем содержимое
-            self.load_tab_content(table, path)
-            
-            # Восстанавливаем позицию прокрутки
-            if table.verticalScrollBar():
-                table.verticalScrollBar().setValue(scroll_pos)
 
-    def refresh_secret_tab_content(self, widget, path):
-        """Обновляет содержимое вкладки секрета без пересоздания"""
-        self.debug_log(f"DEBUG: refresh_secret_tab_content, path={path}")
-        if not self.client:
-            self.debug_log("DEBUG: no client")
+    # ------------------------------------------------------------------
+    # Клики и контекстные меню
+    # ------------------------------------------------------------------
+    def on_table_double_click(self, item):
+        if not item or item.row() < 0:
             return
-        
-        try:
-            data = self.client.read_secret(path)
-            self.debug_log(f"DEBUG: data loaded, keys={list(data.keys())}")
-            
-            # Ищем таблицу
-            table = widget.findChild(QTableWidget)
-            if not table:
-                self.debug_log("DEBUG: no table in widget")
+        table = item.tableWidget()
+        row = item.row()
+        column = item.column()
+
+        if table is self.secret_table:
+            if column == 2:
                 return
-            
-            show_passwords = getattr(self, 'show_passwords', False)
-            self.debug_log(f"DEBUG: show_passwords={show_passwords}")
-            
-            # Очищаем и заполняем таблицу
-            table.setRowCount(len(data))
-            for i, (key, value) in enumerate(data.items()):
-                # Ключ
-                table.setItem(i, 0, QTableWidgetItem(key))
-                
-                # Значение с маскировкой
-                value_item = self.create_password_item(str(value), show_passwords)
-                table.setItem(i, 1, value_item)
-                self.debug_log(f"DEBUG: row {i}, key={key}, value masked={show_passwords}")
-            
-            # Обновляем путь в свойстве таблицы
-            table.setProperty("vault_path", path)
-            
-            # Подгоняем ширину колонок
-            table.resizeColumnsToContents()
-            table.horizontalHeader().setStretchLastSection(True)
-            
-            self.debug_log("DEBUG: refresh_secret_tab_content done")
-            
+            if column == 0:
+                key_item = table.item(row, 0)
+                if key_item:
+                    self.copy_to_clipboard(key_item.text())
+                return
+            self._copy_table_value(table, row)
+            return
+
+        name_item = table.item(row, 0)
+        if not name_item:
+            return
+        path = name_item.data(Qt.UserRole)
+        if not path:
+            return
+
+        is_folder = self._is_folder_row(table, row)
+
+        if not is_folder and column == 1:
+            self._copy_table_value(table, row)
+            return
+
+        if is_folder:
+            self.open_directory(path)
+        else:
+            self.open_secret(path)
+
+    def _copy_table_value(self, table, row):
+        value_item = table.item(row, 1)
+        if value_item is None:
+            return
+        real_value = value_item.data(Qt.UserRole + 1)
+        if real_value:
+            self.copy_to_clipboard(real_value)
+
+    def _show_directory_context_menu(self, pos):
+        table = self.dir_table
+        item = table.itemAt(pos)
+        if not item:
+            return
+        table.setCurrentCell(item.row(), 0)
+
+        row = item.row()
+        name_item = table.item(row, 0)
+        if not name_item:
+            return
+        path = name_item.data(Qt.UserRole)
+        if not path:
+            return
+
+        is_folder = self._is_folder_row(table, row)
+
+        menu = QMenu(self)
+        if is_folder:
+            menu.addAction(
+                "📂 Открыть", lambda: self.open_directory(path)
+            )
+        else:
+            menu.addAction(
+                "📄 Открыть", lambda: self.open_secret(path)
+            )
+            menu.addAction(
+                "📋 Скопировать значение",
+                lambda: self._copy_value_at_row(table, row),
+            )
+            menu.addAction(
+                "🔗 Скопировать путь", lambda: self.copy_to_clipboard(path)
+            )
+            menu.addSeparator()
+            menu.addAction("✏️ Изменить", lambda: self.edit_secret(path))
+            menu.addAction("🗑️ Удалить", lambda: self.delete_secret_path(path))
+
+        menu.addSeparator()
+        menu.addAction(
+            "🔄 Обновить",
+            lambda: self.load_directory(self._directory_path),
+        )
+        menu.exec(table.viewport().mapToGlobal(pos))
+
+    def _show_secret_context_menu(self, pos):
+        table = self.secret_table
+        item = table.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        table.setCurrentCell(row, 0)
+
+        key_item = table.item(row, 0)
+        key = key_item.text() if key_item else ""
+        path = self._secret_path or ""
+
+        menu = QMenu(self)
+        menu.addAction(
+            "📋 Скопировать значение",
+            lambda: self._copy_table_value(table, row),
+        )
+        menu.addAction("🔑 Скопировать ключ", lambda: self.copy_to_clipboard(key))
+        menu.addAction("🔗 Скопировать путь", lambda: self.copy_to_clipboard(path))
+        menu.addSeparator()
+        menu.addAction("✏️ Изменить секрет", lambda: self.edit_secret(path))
+        menu.addAction(
+            "🗑️ Удалить секрет", lambda: self.delete_secret_path(path)
+        )
+        menu.addSeparator()
+        menu.addAction("🔄 Обновить", self.refresh_active_view)
+        menu.exec(table.viewport().mapToGlobal(pos))
+
+    def _copy_value_at_row(self, table, row):
+        name_item = table.item(row, 0)
+        if not name_item:
+            return
+        path = name_item.data(Qt.UserRole)
+        try:
+            data = self._get_secret(path)
         except Exception as e:
-            self.debug_log(f"DEBUG: ERROR in refresh_secret_tab_content: {e}")
-            QMessageBox.warning(self, "Ошибка", f"Не удалось обновить секрет: {e}")
+            QMessageBox.warning(self, "Ошибка", str(e))
+            return
+        value = next(iter(data.values()), "")
+        if value:
+            self.copy_to_clipboard(value)
 
-    def refresh_all_tabs(self):
-        """Обновляет все открытые вкладки"""
-        for i in range(self.tab_widget.count()):
-            widget = self.tab_widget.widget(i)
-            if not widget:
-                continue
-            
-            # Проверяем, есть ли таблица
-            table = widget.findChild(QTableWidget)
-            if table:
-                path = table.property("vault_path")
-                if path is not None:
-                    # Сохраняем текущую позицию прокрутки
-                    scroll_pos = table.verticalScrollBar().value() if table.verticalScrollBar() else 0
-                    
-                    # Перезагружаем содержимое
-                    self.load_tab_content(table, path)
-                    
-                    # Восстанавливаем позицию прокрутки
-                    if table.verticalScrollBar():
-                        table.verticalScrollBar().setValue(scroll_pos)
-            
-            # Для вкладок секретов обновляем через пересоздание
-            label = widget.findChild(QLabel)
-            if label and "Секрет:" in label.text():
-                path = label.text().replace("<b>Секрет:</b> ", "").strip()
-                if path:
-                    display_name = path.split('/')[-1]
-                    # Запоминаем текущий индекс
-                    current_index = i
-                    # Удаляем старую вкладку
-                    self.tab_widget.removeTab(i)
-                    # Создаём новую на том же месте
-                    self.add_secret_tab_at_index(path, display_name, current_index)
+    # ------------------------------------------------------------------
+    # Буфер обмена
+    # ------------------------------------------------------------------
+    def copy_to_clipboard(self, text):
+        text = str(text)
+        QApplication.clipboard().setText(text)
+        self._clipboard_value = text
+        self._clipboard_deadline = (
+            time.monotonic() + self.CLIPBOARD_CLEAR_SECONDS
+        )
+        self._clipboard_timer.start()
+        self._update_clipboard_countdown()
 
-    def add_secret_tab_at_index(self, path, display_name, index):
-        """Создаёт вкладку секрета на конкретной позиции"""
+    def _update_clipboard_countdown(self):
+        if self._clipboard_value is None or self._clipboard_deadline is None:
+            self._clipboard_timer.stop()
+            return
+
+        remaining = math.ceil(self._clipboard_deadline - time.monotonic())
+        if remaining <= 0:
+            self._clear_clipboard()
+            return
+
+        self.status_label.setText(
+            f"📋 Скопировано. Буфер очистится через {remaining} с"
+        )
+
+    def _clear_clipboard(self):
+        cleared = False
+        if (
+            self._clipboard_value is not None
+            and QApplication.clipboard().text() == self._clipboard_value
+        ):
+            QApplication.clipboard().clear()
+            cleared = True
+
+        self._clipboard_value = None
+        self._clipboard_deadline = None
+        self._clipboard_timer.stop()
+        self.status_label.setText(
+            "🧹 Буфер обмена очищен" if cleared else "Готово"
+        )
+
+    def copy_secret_data(self, data):
+        text = "\n".join(f"{k}: {v}" for k, v in data.items())
+        self.copy_to_clipboard(text)
+
+    # ------------------------------------------------------------------
+    # Обновление активной панели
+    # ------------------------------------------------------------------
+    def refresh_active_view(self):
         if not self.client:
             return
-        
-        try:
-            data = self.client.read_secret(path)
-            
-            tab_widget = QWidget()
-            tab_layout = QVBoxLayout(tab_widget)
-            tab_layout.setContentsMargins(10, 10, 10, 10)
-            
-            info_label = QLabel(f"<b>Секрет:</b> {path}")
-            info_label.setStyleSheet("padding: 5px; background: #f8f9fa; border-radius: 4px;")
-            info_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            info_label.setWordWrap(True)
-            tab_layout.addWidget(info_label)
-            
-            copy_path_btn = QPushButton("📋 Скопировать путь")
-            copy_path_btn.clicked.connect(lambda: self.copy_to_clipboard(path))
-            tab_layout.addWidget(copy_path_btn)
-            
-            table = QTableWidget()
-            table.setColumnCount(2)
-            table.setHorizontalHeaderLabels(["Ключ", "Значение"])
-            table.horizontalHeader().setStretchLastSection(True)
-            table.setProperty("vault_path", path)
-            
-            show_passwords = getattr(self, 'show_passwords', False)
-            
-            table.setRowCount(len(data))
-            for i, (key, value) in enumerate(data.items()):
-                table.setItem(i, 0, QTableWidgetItem(key))
-                value_item = self.create_password_item(str(value), show_passwords)
-                table.setItem(i, 1, value_item)
-            
-            copy_btn = QPushButton("📋 Скопировать всё")
-            copy_btn.clicked.connect(lambda: self.copy_secret_data(data))
-            copy_btn.setStyleSheet("""
-                QPushButton {
-                    padding: 8px;
-                    background: #0078d4;
-                    color: white;
-                    border: none;
-                    border-radius: 4px;
-                }
-                QPushButton:hover {
-                    background: #005a9e;
-                }
-            """)
-            
-            tab_layout.addWidget(copy_btn)
-            tab_layout.addWidget(table)
-            
-            # Вставляем вкладку на указанную позицию
-            self.tab_widget.insertTab(index, tab_widget, f"📄 {display_name}")
-            self.tab_widget.setCurrentIndex(index)
-            
-        except Exception as e:
-            QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить секрет: {e}")
 
-    def refresh_table_passwords(self, table):
-        """Обновляет отображение паролей в таблице"""
-        if not table:
+        path = self._active_path
+        if path == "" or path.endswith("/"):
+            self.load_directory(path)
+        else:
+            self.show_secret(path)
+
+    # ------------------------------------------------------------------
+    # Создание / редактирование / удаление
+    # ------------------------------------------------------------------
+    def create_secret(self):
+        if not self.client:
+            QMessageBox.warning(self, "Ошибка", "Сначала подключитесь")
             return
-        
-        show = getattr(self, 'show_passwords', False)
-        
-        for row in range(table.rowCount()):
-            # Проверяем колонку 1 - там могут быть пароли
-            item = table.item(row, 1)
-            if not item:
-                continue
-            
-            # Проверяем, что это замаскированный пароль
-            is_masked = item.data(Qt.UserRole) == "hidden"
-            if is_masked:
-                # Восстанавливаем реальное значение
-                real_value = item.data(Qt.UserRole + 1)
-                if real_value:
-                    new_item = self.create_password_item(real_value, show)
-                    table.setItem(row, 1, new_item)
 
-    def _create_tree_widget(self):
-        """Создаёт виджет дерева (для левой панели)"""
-        self.tree = QTreeWidget()
-        self.tree.setHeaderLabel("Каталоги")
-        self.tree.setIconSize(QSize(20, 20))
-        self.tree.itemDoubleClicked.connect(self.on_tree_click)
-        
-        # Иконки для дерева
-        self.tree.setStyleSheet("""
-            QTreeWidget::item {
-                padding: 4px;
-            }
-            QTreeWidget::item:hover {
-                background: #e8f0fe;
-            }
-            QTreeWidget::item:selected {
-                background: #d2e3fc;
-            }
-        """)
-        
-        return self.tree
+        dialog = SecretDialog(self)
+        if not dialog.exec():
+            return
+
+        path, data = dialog.get_secret()
+        if not path or not data:
+            QMessageBox.warning(
+                self, "Ошибка", "Путь и данные не могут быть пустыми"
+            )
+            return
+
+        try:
+            existing = self._get_secret(path, force=True)
+            if existing:
+                reply = QMessageBox.question(
+                    self,
+                    "Секрет уже существует",
+                    f"Секрет '{path}' уже существует.\n\n"
+                    "Хотите перезаписать его?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply == QMessageBox.No:
+                    self.status_label.setText("⏹️ Создание отменено")
+                    return
+
+            self.client.create_secret(path, data)
+            self._invalidate_cache(path)
+            self._active_path = path
+            self.refresh(silent=True)
+            self.status_label.setText(
+                f"✅ {'Обновлён' if existing else 'Создан'} секрет: {path}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", str(e))
+
+    def edit_secret(self, path):
+        if not self.client or not path:
+            return
+
+        try:
+            data = self._get_secret(path, force=True)
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", str(e))
+            return
+
+        dialog = SecretDialog(self, existing_path=path, existing_data=data)
+        if not dialog.exec():
+            return
+
+        new_path, new_data = dialog.get_secret()
+        if not new_data:
+            QMessageBox.warning(
+                self, "Ошибка", "Добавьте хотя бы одну пару ключ-значение"
+            )
+            return
+
+        try:
+            self.client.create_secret(new_path, new_data)
+            self._invalidate_cache(path)
+            self._active_path = new_path
+            self.refresh(silent=True)
+            self.status_label.setText(f"✅ Секрет обновлён: {new_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", str(e))
+
+    def _selected_secret_for_deletion(self):
+        """Возвращает путь секрета, который сейчас выбран для удаления."""
+        if (
+            self.content_stack.currentWidget() is self.secret_page
+            and self._secret_path
+        ):
+            return self._secret_path
+
+        if self.content_stack.currentWidget() is self.directory_page:
+            table = self.dir_table
+            row = table.currentRow()
+            if row < 0 or self._is_folder_row(table, row):
+                return None
+            name_item = table.item(row, 0)
+            if name_item:
+                return name_item.data(Qt.UserRole)
+
+        return None
+
+    def _update_delete_action(self):
+        """Обновляет единственную кнопку удаления под текущий выбор."""
+        path = self._selected_secret_for_deletion()
+        if path:
+            name = path.rstrip("/").rsplit("/", 1)[-1]
+            self.btn_delete.setEnabled(True)
+            self.btn_delete.setToolTip(f"Удалить секрет: {path}")
+            self.delete_target_label.setText(f"Выбран секрет: {name}")
+            self.delete_target_label.setToolTip(path)
+            return
+
+        self.btn_delete.setEnabled(False)
+        self.btn_delete.setToolTip("Выберите секрет для удаления")
+        self.delete_target_label.setToolTip("")
+
+        if (
+            self.content_stack.currentWidget() is self.directory_page
+            and self.dir_table.currentRow() >= 0
+        ):
+            self.delete_target_label.setText(
+                "Выбран каталог — удаление недоступно"
+            )
+        else:
+            self.delete_target_label.setText("Секрет не выбран")
+
+    def delete_secret(self):
+        """Удаляет секрет, выбранный в правой панели."""
+        path = self._selected_secret_for_deletion()
+        if not path:
+            QMessageBox.warning(
+                self, "Ошибка", "Выберите секрет для удаления"
+            )
+            return
+        self.delete_secret_path(path)
+
+    def _confirm_secret_deletion(self, path):
+        dialog = DeleteSecretDialog(path, self)
+        return bool(dialog.exec())
+
+    def delete_secret_path(self, path):
+        if not self.client or not path:
+            return
+
+        if not self._confirm_secret_deletion(path):
+            self.status_label.setText("⏹️ Удаление отменено")
+            return
+
+        parent = path.rsplit("/", 1)[0] if "/" in path else ""
+        parent_path = f"{parent}/" if parent else ""
+
+        try:
+            self.client.delete_secret(path)
+            self._invalidate_cache(path)
+            if self._secret_path == path:
+                self._secret_path = None
+                self._secret_data = {}
+            if self._active_path == path:
+                self._active_path = parent_path
+            self.refresh(silent=True)
+            self.status_label.setText(f"🗑️ Удалён: {path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", str(e))
+
+    # ------------------------------------------------------------------
+    # Поиск
+    # ------------------------------------------------------------------
+    def show_search_dialog(self):
+        if not self.client:
+            QMessageBox.warning(
+                self, "Ошибка", "Сначала подключитесь к Vault"
+            )
+            return
+
+        dialog = SearchDialog(self.client, self)
+        dialog.exec()

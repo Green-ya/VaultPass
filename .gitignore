@@ -1,5 +1,15 @@
 .env
 .venv
+venv
 dist
 build
 AppDir
+*.AppImage
+!appimagetool-x86_64.AppImage
+!linuxdeploy-x86_64.AppImage
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+VaultPass-x86_64.AppImage

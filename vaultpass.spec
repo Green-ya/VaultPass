@@ -1,18 +1,38 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('ui', 'ui'), ('resources', 'resources'), ('vault_client.py', '.'), ('config_manager.py', '.')]
+PROJECT_ROOT = os.path.abspath(SPECPATH)
+
+datas = [(os.path.join(PROJECT_ROOT, 'resources'), 'resources')]
 binaries = []
-hiddenimports = ['hvac']
-tmp_ret = collect_all('cryptography')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('hvac')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+hiddenimports = [
+    # Локальные модули: без pathex PyInstaller их не видит при сборке
+    # через консольный скрипт (cwd не попадает в module search paths).
+    'config_manager',
+    'resource_utils',
+    'vault_client',
+    'ui',
+    'ui.dialogs',
+    'ui.main_window',
+    'ui.search_dialog',
+]
+
+for package in ('cryptography', 'hvac', 'keyring', 'secretstorage'):
+    try:
+        package_datas, package_binaries, package_hiddenimports = collect_all(package)
+    except Exception:
+        # secretstorage — необязательный backend для keyring
+        continue
+    datas += package_datas
+    binaries += package_binaries
+    hiddenimports += package_hiddenimports
 
 
 a = Analysis(
-    ['main.py'],
-    pathex=[],
+    [os.path.join(PROJECT_ROOT, 'main.py')],
+    pathex=[PROJECT_ROOT],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
