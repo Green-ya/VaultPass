@@ -9,6 +9,7 @@ build
 AppDir
 *.AppImage
 runtime-x86_64
+result
 
 # Python
 __pycache__/
