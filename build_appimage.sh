@@ -48,6 +48,17 @@ exec "$HERE/usr/bin/vaultpass" "$@"
 EOF
 chmod +x AppDir/AppRun
 
+# Скачиваем appimagetool, если его нет локально (в репозитории он не хранится)
+if [ ! -x appimagetool-x86_64.AppImage ]; then
+    echo "Скачиваем appimagetool…"
+    URL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+    if command -v wget >/dev/null 2>&1; then
+        wget -c -O appimagetool-x86_64.AppImage "$URL"
+    else
+        curl -L -o appimagetool-x86_64.AppImage "$URL"
+    fi
+fi
+
 chmod +x appimagetool-x86_64.AppImage
 
 # Собираем во временный файл и заменяем атомарно: это позволяет

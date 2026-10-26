@@ -1,15 +1,23 @@
+# Зависимости и окружения
 .env
 .venv
 venv
+
+# Артефакты сборки
 dist
 build
 AppDir
 *.AppImage
-!appimagetool-x86_64.AppImage
-!linuxdeploy-x86_64.AppImage
+runtime-x86_64
+
+# Python
 __pycache__/
 *.py[cod]
+*.egg-info/
+
+# Инструменты
 .pytest_cache/
 .ruff_cache/
-*.egg-info/
-VaultPass-x86_64.AppImage
+.mypy_cache/
+.vscode/
+.idea/

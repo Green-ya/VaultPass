@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="vaultpass",
-    version="1.1.0",
+    version="0.1.0",
     description="GUI-менеджер паролей для HashiCorp Vault",
     py_modules=["main", "vault_client", "config_manager", "resource_utils"],
     packages=find_packages(include=["ui", "ui.*"]),
