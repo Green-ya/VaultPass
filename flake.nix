@@ -2,7 +2,7 @@
   description = "VaultPass application";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
   };
 
   outputs = { self, nixpkgs, ... }:
