@@ -9,7 +9,7 @@ build
 AppDir
 *.AppImage
 runtime-x86_64
-result
+
 
 # Python
 __pycache__/
@@ -22,3 +22,7 @@ __pycache__/
 .mypy_cache/
 .vscode/
 .idea/
+
+#nix
+result
+./flake.lock
