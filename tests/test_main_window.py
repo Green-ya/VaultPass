@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidgetItem,
 )
+from fakes import CountingClient, FakeClient, FakeKeyring
 
 import config_manager as config_module
 from config_manager import ConfigManager
@@ -17,62 +18,6 @@ from ui.dialogs import ConfigDialog, DeleteSecretDialog, SecretDialog
 from ui.main_window import MainWindow
 from ui.search_dialog import SearchDialog
 from vault_client import VaultClientError
-
-
-class FakeClient:
-    def __init__(self):
-        self.tree = {
-            "": ["folder/", "root-secret"],
-            "folder/": ["nested"],
-        }
-        self.deleted = []
-        self.created = []
-
-    def list_secrets(self, path=""):
-        return self.tree.get(path, [])
-
-    def iter_all_secrets(self, root=""):
-        root = (root or "").strip("/")
-        stack = [f"{root}/" if root else ""]
-        while stack:
-            path = stack.pop()
-            for item in self.list_secrets(path):
-                full_path = f"{path}{item}"
-                if item.endswith("/"):
-                    stack.append(full_path)
-                else:
-                    yield full_path
-
-    def read_secret(self, path):
-        return {"password": f"value-of-{path}", "user": "alice"}
-
-    def create_secret(self, path, data):
-        self.created.append((path, data))
-        parent = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
-        name = path.rsplit("/", 1)[-1]
-        if name not in self.tree.setdefault(parent, []):
-            self.tree[parent].append(name)
-        return True
-
-    def delete_secret(self, path):
-        self.deleted.append(path)
-        parent = path.rsplit("/", 1)[0] if "/" in path else ""
-        parent_path = f"{parent}/" if parent else ""
-        name = path.rsplit("/", 1)[-1]
-        if name in self.tree.get(parent_path, []):
-            self.tree[parent_path].remove(name)
-        return True
-
-
-class CountingClient(FakeClient):
-    def __init__(self, count):
-        super().__init__()
-        self.tree = {"": [f"secret-{i}" for i in range(count)]}
-        self.reads = []
-
-    def read_secret(self, path):
-        self.reads.append(path)
-        return super().read_secret(path)
 
 
 @pytest.fixture(scope="session")
@@ -1093,3 +1038,107 @@ def test_config_dialog_empty_mount_defaults_to_secret(window):
 
     assert mount == "secret"
     dialog.close()
+
+
+# ----------------------------------------------------------------------
+# Автоподключение по сохранённому конфигу
+# ----------------------------------------------------------------------
+def test_load_config_without_saved_config_is_noop(window):
+    window._load_config()
+
+    assert window.client is None
+    assert not window.content_stack.currentWidget() is window.secret_page
+
+
+def test_load_config_client_error_is_reported(window, monkeypatch, caplog):
+    monkeypatch.setattr(
+        window.config_manager,
+        "load_config",
+        lambda: {
+            "url": "https://vault.local",
+            "token": "token",
+            "mount_point": "secret",
+        },
+    )
+
+    class BoomVaultClient:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("vault недоступен")
+
+    monkeypatch.setattr("ui.main_window.VaultClient", BoomVaultClient)
+
+    with caplog.at_level(logging.ERROR, logger="ui.main_window"):
+        window._load_config()
+
+    assert window.status_label.text().startswith("❌")
+    assert any("vault недоступен" in r.getMessage() for r in caplog.records)
+
+
+# ----------------------------------------------------------------------
+# rename_secret: ветки ошибок
+# ----------------------------------------------------------------------
+def test_rename_secret_not_found_warns(window, monkeypatch):
+    client = FakeClient()
+    window.client = client
+    window.refresh(silent=True)
+    monkeypatch.setattr(window, "_get_secret", lambda path, force=False: {})
+    monkeypatch.setattr(
+        "ui.main_window.QInputDialog.getText",
+        staticmethod(lambda *args, **kwargs: ("renamed", True)),
+    )
+
+    window.rename_secret("root-secret")
+
+    assert "не найден" in window.status_label.text().lower()
+    assert not client.created
+
+
+def test_rename_secret_client_error_is_reported(
+    window, monkeypatch, caplog
+):
+    class BoomClient(FakeClient):
+        def create_secret(self, path, data):
+            raise RuntimeError("запись запрещена")
+
+    client = BoomClient()
+    window.client = client
+    window.refresh(silent=True)
+    monkeypatch.setattr(
+        "ui.main_window.QInputDialog.getText",
+        staticmethod(lambda *args, **kwargs: ("renamed", True)),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="ui.main_window"):
+        window.rename_secret("root-secret")
+
+    assert window.status_label.text().startswith("❌")
+    assert any("запись запрещена" in r.getMessage() for r in caplog.records)
+    assert not client.deleted
+
+
+# ----------------------------------------------------------------------
+# Keyring доступен
+# ----------------------------------------------------------------------
+def test_window_boots_with_keyring_available(app, tmp_path, monkeypatch):
+    fake_keyring = FakeKeyring()
+    monkeypatch.setattr(config_module, "keyring", fake_keyring)
+    monkeypatch.setattr(ConfigManager, "CONFIG_DIR", tmp_path / "vaultpass")
+    monkeypatch.setattr(
+        ConfigManager, "CONFIG_FILE", tmp_path / "vaultpass" / "config.enc"
+    )
+    monkeypatch.setattr(
+        ConfigManager, "KEY_FILE", tmp_path / "vaultpass" / "key.bin"
+    )
+    monkeypatch.setattr(ConfigManager, "LEGACY_DIR", tmp_path / "legacy")
+
+    keyring_window = MainWindow()
+    keyring_window.config_manager.save_config("https://vault.local", "token")
+
+    # Ключ шифрования ушёл в keyring, а не в файл
+    assert not keyring_window.config_manager.KEY_FILE.exists()
+    assert fake_keyring.store
+
+    keyring_window._clipboard_timer.stop()
+    keyring_window.close()
+    keyring_window.deleteLater()
+    app.processEvents()

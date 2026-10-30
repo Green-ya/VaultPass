@@ -100,7 +100,7 @@ pytest -q
 ```
 
 Тесты не требуют реального Vault и запускают Qt в режиме `offscreen`
-(сейчас — 98 тестов). В CI (`GitHub Actions`) прогоняются `pylint` и `pytest`
+(сейчас — 107 тестов). В CI (`GitHub Actions`) прогоняются `pylint` и `pytest`
 на Python 3.11 и 3.12.
 
 ## 📦 Сборка AppImage

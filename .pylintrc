@@ -1,6 +1,7 @@
 [MAIN]
 # Позволяет pylint находить модули проекта (logging_setup и т.п.)
-init-hook=import sys; sys.path.insert(0, ".")
+# и тестовые помощники (tests/fakes.py).
+init-hook=import sys; sys.path.insert(0, "."); sys.path.insert(0, "tests")
 
 [MESSAGES CONTROL]
 # Отключаем стилевые и заведомо шумные проверки для Qt-кода:
