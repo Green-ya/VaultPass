@@ -6,9 +6,10 @@ from PySide6.QtWidgets import QApplication, QPushButton
 
 import config_manager as config_module
 from config_manager import ConfigManager
-from ui.dialogs import DeleteSecretDialog
+from ui.dialogs import ConfigDialog, DeleteSecretDialog, SecretDialog
 from ui.main_window import MainWindow
 from ui.search_dialog import SearchDialog
+from vault_client import VaultClientError
 
 
 class FakeClient:
@@ -215,6 +216,92 @@ def test_close_clears_clipboard_and_cache(window):
     assert QApplication.clipboard().text() == ""
     assert window._secret_cache == {}
     assert not window._clipboard_timer.isActive()
+
+
+def test_notify_levels_write_to_status_label(window):
+    window.info("ℹ️ инфо")
+    assert window.status_label.text() == "ℹ️ инфо"
+
+    window.warn("⚠️ предупреждение")
+    assert window.status_label.text() == "⚠️ предупреждение"
+
+    window.error("❌ ошибка")
+    assert window.status_label.text() == "❌ ошибка"
+    # Ошибка не автоскрывается — держится до следующего сообщения
+    assert not window._status_timer.isActive()
+
+
+def test_info_autohides_via_timer(window):
+    window.info("ℹ️ привет", timeout=1000)
+    assert window._status_timer.isActive()
+
+    window._status_timer.stop()
+    window._reset_status()
+    assert window.status_label.text() == "Готово"
+
+
+def test_search_without_connection_warns_in_status(window):
+    assert window.client is None
+
+    window.show_search_dialog()
+
+    assert "подключитесь" in window.status_label.text().lower()
+
+
+def test_config_dialog_inline_validation(window):
+    dialog = ConfigDialog(window)
+
+    dialog.url_edit.setText("")
+    dialog.token_edit.setText("")
+    dialog.accept()
+    assert "URL" in dialog.error_label.text()
+
+    dialog.url_edit.setText("https://vault.local")
+    dialog.token_edit.setText("")
+    dialog.accept()
+    assert "токен" in dialog.error_label.text().lower()
+
+    dialog.close()
+
+
+def test_secret_dialog_inline_validation(window):
+    dialog = SecretDialog(window)
+
+    dialog.path_edit.setText("")
+    dialog.accept()
+    assert "путь" in dialog.error_label.text().lower()
+
+    dialog.path_edit.setText("team/db/prod")
+    dialog.accept()  # строки пустые → нет данных
+    assert "ключ" in dialog.error_label.text().lower()
+
+    dialog.close()
+
+
+def test_secret_dialog_generator_fills_row(window):
+    dialog = SecretDialog(window)
+    dialog.length_spin.setValue(32)
+    dialog.generate_into_row(0)
+
+    value = dialog.table.item(0, 1).text()
+    assert len(value) == 32
+    assert len(set(value)) > 1
+
+    dialog.close()
+
+
+def test_search_error_reported_in_dialog_status(window):
+    class BoomClient(FakeClient):
+        def iter_all_secrets(self, root=""):
+            raise VaultClientError("сеть недоступна")
+
+    dialog = SearchDialog(BoomClient(), window)
+    dialog.query_edit.setText("x")
+    dialog.run_search()
+
+    assert "❌" in dialog.status_label.text()
+    assert "сеть недоступна" in dialog.status_label.text()
+    dialog.close()
 
 
 def test_expanded_folders_survive_refresh(window):

@@ -75,6 +75,11 @@ class MainWindow(QMainWindow):
         self._clipboard_timer.setInterval(250)
         self._clipboard_timer.timeout.connect(self._update_clipboard_countdown)
 
+        # Автоскрытие уведомлений в статусной строке.
+        self._status_timer = QTimer(self)
+        self._status_timer.setSingleShot(True)
+        self._status_timer.timeout.connect(self._reset_status)
+
         self._create_menu()
         self._create_widgets()
         self._load_config()
@@ -86,8 +91,33 @@ class MainWindow(QMainWindow):
         """При закрытии окна очищаем буфер обмена и секреты из памяти."""
         self._clear_clipboard()
         self._clipboard_timer.stop()
+        self._status_timer.stop()
         self._secret_cache.clear()
         super().closeEvent(event)
+
+    # ------------------------------------------------------------------
+    # Уведомления — единая точка вывода в статусную строку
+    # ------------------------------------------------------------------
+    def _notify(self, text, timeout=5000):
+        self.status_label.setText(text)
+        self._status_timer.stop()
+        if timeout and timeout > 0:
+            self._status_timer.start(timeout)
+
+    def info(self, text, timeout=5000):
+        """Информационное сообщение в статусной строке."""
+        self._notify(text, timeout)
+
+    def warn(self, text, timeout=8000):
+        """Предупреждение в статусной строке."""
+        self._notify(text, timeout)
+
+    def error(self, text, timeout=0):
+        """Ошибка в статусной строке; держится до следующего сообщения."""
+        self._notify(text, timeout)
+
+    def _reset_status(self):
+        self.status_label.setText("Готово")
 
     # ------------------------------------------------------------------
     # Вспомогательные методы
@@ -98,9 +128,10 @@ class MainWindow(QMainWindow):
 
     def toggle_debug_mode(self, checked):
         self.debug_mode = checked
-        self.status_label.setText(
-            "🐛 Режим отладки включён" if checked else "Готово"
-        )
+        if checked:
+            self.info("🐛 Режим отладки включён")
+        else:
+            self._reset_status()
 
     def _build_eye_icon(self, crossed: bool) -> QIcon:
         """Рисуем иконку глаза; перечёркнутый — значение открыто."""
@@ -480,7 +511,7 @@ class MainWindow(QMainWindow):
                 save=False,
             )
         except Exception as e:
-            self.status_label.setText(f"❌ Ошибка: {e}")
+            self.error(f"Ошибка: {e}")
 
     def _connect_to_vault(self, url, token, mount_point, save=True):
         client = VaultClient(url, token, mount_point)
@@ -491,7 +522,7 @@ class MainWindow(QMainWindow):
         if save:
             self.config_manager.save_config(url, token, mount_point)
 
-        self.status_label.setText(f"✅ Подключено к {url}")
+        self.info(f"✅ Подключено к {url}")
         self.refresh(silent=True)
 
     def show_config_dialog(self):
@@ -503,7 +534,7 @@ class MainWindow(QMainWindow):
         try:
             self._connect_to_vault(url, token, mount)
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
+            self.error(str(e))
 
     # ------------------------------------------------------------------
     # Дерево
@@ -512,9 +543,7 @@ class MainWindow(QMainWindow):
         """Перестраивает дерево и обновляет активную правую панель."""
         if not self.client:
             if not silent:
-                QMessageBox.warning(
-                    self, "Ошибка", "Сначала подключитесь к Vault"
-                )
+                self.warn("Сначала подключитесь к Vault")
             return
 
         active_path = self._active_path
@@ -544,7 +573,7 @@ class MainWindow(QMainWindow):
         self.tree.scrollToItem(item)
 
         if not silent:
-            self.status_label.setText("🔄 Обновлено")
+            self.info("🔄 Обновлено")
 
     def _expanded_tree_paths(self):
         paths = set()
@@ -610,9 +639,7 @@ class MainWindow(QMainWindow):
             items = self.client.list_secrets(path)
         except Exception as e:
             if show_errors:
-                QMessageBox.warning(
-                    self, "Ошибка", f"Не удалось загрузить {path or '/'}: {e}"
-                )
+                self.error(f"Не удалось загрузить {path or '/'}: {e}")
             return
 
         for item in items:
@@ -695,9 +722,7 @@ class MainWindow(QMainWindow):
         try:
             data = self._get_secret(path)
         except Exception as e:
-            QMessageBox.warning(
-                self, "Ошибка", f"Не удалось загрузить секрет: {e}"
-            )
+            self.error(f"Не удалось загрузить секрет: {e}")
             return
 
         self._active_path = path
@@ -717,9 +742,7 @@ class MainWindow(QMainWindow):
         try:
             items = self.client.list_secrets(path)
         except Exception as e:
-            QMessageBox.warning(
-                self, "Ошибка", f"Не удалось загрузить {path or '/'}: {e}"
-            )
+            self.error(f"Не удалось загрузить {path or '/'}: {e}")
             return
 
         prefix = (path or "").rstrip("/")
@@ -1016,7 +1039,7 @@ class MainWindow(QMainWindow):
         try:
             data = self._get_secret(path)
         except Exception as e:
-            QMessageBox.warning(self, "Ошибка", str(e))
+            self.error(str(e))
             return
         value = next(iter(data.values()), "")
         if value:
@@ -1086,7 +1109,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def create_secret(self):
         if not self.client:
-            QMessageBox.warning(self, "Ошибка", "Сначала подключитесь")
+            self.warn("Сначала подключитесь")
             return
 
         dialog = SecretDialog(self)
@@ -1095,9 +1118,7 @@ class MainWindow(QMainWindow):
 
         path, data = dialog.get_secret()
         if not path or not data:
-            QMessageBox.warning(
-                self, "Ошибка", "Путь и данные не могут быть пустыми"
-            )
+            self.warn("Путь и данные не могут быть пустыми")
             return
 
         try:
@@ -1112,18 +1133,18 @@ class MainWindow(QMainWindow):
                     QMessageBox.No,
                 )
                 if reply == QMessageBox.No:
-                    self.status_label.setText("⏹️ Создание отменено")
+                    self.info("⏹️ Создание отменено")
                     return
 
             self.client.create_secret(path, data)
             self._invalidate_cache(path)
             self._active_path = path
             self.refresh(silent=True)
-            self.status_label.setText(
+            self.info(
                 f"✅ {'Обновлён' if existing else 'Создан'} секрет: {path}"
             )
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
+            self.error(str(e))
 
     def edit_secret(self, path):
         if not self.client or not path:
@@ -1132,7 +1153,7 @@ class MainWindow(QMainWindow):
         try:
             data = self._get_secret(path, force=True)
         except Exception as e:
-            QMessageBox.warning(self, "Ошибка", str(e))
+            self.error(str(e))
             return
 
         dialog = SecretDialog(self, existing_path=path, existing_data=data)
@@ -1141,9 +1162,7 @@ class MainWindow(QMainWindow):
 
         new_path, new_data = dialog.get_secret()
         if not new_data:
-            QMessageBox.warning(
-                self, "Ошибка", "Добавьте хотя бы одну пару ключ-значение"
-            )
+            self.warn("Добавьте хотя бы одну пару ключ-значение")
             return
 
         try:
@@ -1151,9 +1170,9 @@ class MainWindow(QMainWindow):
             self._invalidate_cache(path)
             self._active_path = new_path
             self.refresh(silent=True)
-            self.status_label.setText(f"✅ Секрет обновлён: {new_path}")
+            self.info(f"✅ Секрет обновлён: {new_path}")
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
+            self.error(str(e))
 
     def _selected_secret_for_deletion(self):
         """Возвращает путь секрета, который сейчас выбран для удаления."""
@@ -1203,9 +1222,7 @@ class MainWindow(QMainWindow):
         """Удаляет секрет, выбранный в правой панели."""
         path = self._selected_secret_for_deletion()
         if not path:
-            QMessageBox.warning(
-                self, "Ошибка", "Выберите секрет для удаления"
-            )
+            self.warn("Выберите секрет для удаления")
             return
         self.delete_secret_path(path)
 
@@ -1218,7 +1235,7 @@ class MainWindow(QMainWindow):
             return
 
         if not self._confirm_secret_deletion(path):
-            self.status_label.setText("⏹️ Удаление отменено")
+            self.info("⏹️ Удаление отменено")
             return
 
         parent = path.rsplit("/", 1)[0] if "/" in path else ""
@@ -1233,18 +1250,16 @@ class MainWindow(QMainWindow):
             if self._active_path == path:
                 self._active_path = parent_path
             self.refresh(silent=True)
-            self.status_label.setText(f"🗑️ Удалён: {path}")
+            self.info(f"🗑️ Удалён: {path}")
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", str(e))
+            self.error(str(e))
 
     # ------------------------------------------------------------------
     # Поиск
     # ------------------------------------------------------------------
     def show_search_dialog(self):
         if not self.client:
-            QMessageBox.warning(
-                self, "Ошибка", "Сначала подключитесь к Vault"
-            )
+            self.warn("Сначала подключитесь к Vault")
             return
 
         dialog = SearchDialog(self.client, self)

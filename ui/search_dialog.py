@@ -9,7 +9,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
-    QMessageBox,
     QProgressDialog,
     QPushButton,
     QTableWidget,
@@ -105,6 +104,7 @@ class SearchDialog(QDialog):
 
         scanned = 0
         cancelled = False
+        error_text = None
         try:
             for path in self.client.iter_all_secrets():
                 if progress.wasCanceled():
@@ -125,14 +125,16 @@ class SearchDialog(QDialog):
                 if self.search_values_cb.isChecked():
                     self._match_values(path, query)
         except VaultClientError as e:
-            QMessageBox.warning(self, "Ошибка поиска", str(e))
+            error_text = str(e)
         except Exception as e:  # сетевые ошибки и неожиданные ответы Vault
-            QMessageBox.warning(self, "Ошибка поиска", f"Поиск прерван: {e}")
+            error_text = f"Поиск прерван: {e}"
         finally:
             QApplication.restoreOverrideCursor()
             progress.close()
 
-        if cancelled:
+        if error_text is not None:
+            self.status_label.setText(f"❌ {error_text}")
+        elif cancelled:
             self.status_label.setText(
                 f"Поиск отменён. Проверено: {scanned}, найдено: {self._found}"
             )

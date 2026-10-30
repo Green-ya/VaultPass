@@ -90,6 +90,11 @@ class ConfigDialog(QDialog):
 
         layout.addLayout(form)
 
+        self.error_label = QLabel("")
+        self.error_label.setStyleSheet("color: #c62828;")
+        self.error_label.setWordWrap(True)
+        layout.addWidget(self.error_label)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -108,12 +113,13 @@ class ConfigDialog(QDialog):
         )
 
     def accept(self):
+        self.error_label.setText("")
         url, token, mount = self.get_config()
         if not url:
-            QMessageBox.warning(self, "Ошибка", "Укажите URL Vault")
+            self.error_label.setText("⚠️ Укажите URL Vault")
             return
         if not token:
-            QMessageBox.warning(self, "Ошибка", "Укажите токен доступа")
+            self.error_label.setText("⚠️ Укажите токен доступа")
             return
         if not mount:
             self.mount_edit.setText("secret")
@@ -218,6 +224,12 @@ class SecretDialog(QDialog):
             self.add_empty_row()
             self.add_empty_row()
 
+        # Строка встроенной валидации (вместо модальных окон)
+        self.error_label = QLabel("")
+        self.error_label.setStyleSheet("color: #c62828;")
+        self.error_label.setWordWrap(True)
+        layout.addWidget(self.error_label)
+
         # Кнопки OK/Cancel
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -272,9 +284,7 @@ class SecretDialog(QDialog):
         if row < 0:
             return
         if self.table.rowCount() <= 1:
-            QMessageBox.information(
-                self, "Информация", "Должна быть хотя бы одна строка"
-            )
+            self.error_label.setText("⚠️ Должна быть хотя бы одна строка")
             return
 
         key_item = self.table.item(row, 0)
@@ -315,7 +325,7 @@ class SecretDialog(QDialog):
                 use_symbols=self.symbols_cb.isChecked(),
             )
         except ValueError as e:
-            QMessageBox.warning(self, "Ошибка", str(e))
+            self.error_label.setText(f"⚠️ {e}")
             return
 
         item = self.table.item(row, 1)
@@ -326,15 +336,14 @@ class SecretDialog(QDialog):
         self.table.setCurrentCell(row, 1)
 
     def accept(self):
+        self.error_label.setText("")
         path, data = self.get_secret()
         if not path:
-            QMessageBox.warning(self, "Ошибка", "Укажите путь к секрету")
+            self.error_label.setText("⚠️ Укажите путь к секрету")
             return
         if not data:
-            QMessageBox.warning(
-                self,
-                "Ошибка",
-                "Добавьте хотя бы одну пару ключ-значение",
+            self.error_label.setText(
+                "⚠️ Добавьте хотя бы одну пару ключ-значение"
             )
             return
         super().accept()
