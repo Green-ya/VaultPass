@@ -68,6 +68,7 @@ class MainWindow(QMainWindow):
 
         self._clipboard_value = None
         self._clipboard_deadline = None
+        self._last_error = False
 
         self.setWindowTitle("VaultPass - Менеджер паролей")
         self.setGeometry(100, 100, 1100, 750)
@@ -119,14 +120,17 @@ class MainWindow(QMainWindow):
 
     def info(self, text, timeout=5000):
         """Информационное сообщение в статусной строке."""
+        self._last_error = False
         self._notify(text, timeout)
 
     def warn(self, text, timeout=8000):
         """Предупреждение в статусной строке."""
+        self._last_error = False
         self._notify(text, timeout)
 
     def error(self, text, timeout=0):
         """Ошибка в статусной строке; держится до следующего сообщения."""
+        self._last_error = True
         self._notify(text, timeout)
 
     def _reset_status(self):
@@ -655,7 +659,8 @@ class MainWindow(QMainWindow):
             self.tree.setCurrentItem(item)
         self.tree.scrollToItem(item)
 
-        if not silent:
+        # Не перекрываем сообщение об ошибке, если обновление частично не удалось.
+        if not silent and not self._last_error:
             self.info("🔄 Обновлено")
 
     def _expanded_tree_paths(self):
@@ -1103,32 +1108,15 @@ class MainWindow(QMainWindow):
             # В большом каталоге значение подгружается лениво — читаем его.
             self._copy_value_at_row(table, row)
 
-    def _show_directory_context_menu(self, pos):
+    def _build_directory_menu(self, row, path):
         table = self.dir_table
-        item = table.itemAt(pos)
-        if not item:
-            return
-        table.setCurrentCell(item.row(), 0)
-
-        row = item.row()
-        name_item = table.item(row, 0)
-        if not name_item:
-            return
-        path = name_item.data(Qt.UserRole)
-        if not path:
-            return
-
         is_folder = self._is_folder_row(table, row)
 
         menu = QMenu(self)
         if is_folder:
-            menu.addAction(
-                "📂 Открыть", lambda: self.open_directory(path)
-            )
+            menu.addAction("📂 Открыть", lambda: self.open_directory(path))
         else:
-            menu.addAction(
-                "📄 Открыть", lambda: self.open_secret(path)
-            )
+            menu.addAction("📄 Открыть", lambda: self.open_secret(path))
             menu.addAction(
                 "📋 Скопировать значение",
                 lambda: self._copy_value_at_row(table, row),
@@ -1145,16 +1133,28 @@ class MainWindow(QMainWindow):
             "🔄 Обновить",
             lambda: self.load_directory(self._directory_path),
         )
-        menu.exec(table.viewport().mapToGlobal(pos))
+        return menu
 
-    def _show_secret_context_menu(self, pos):
-        table = self.secret_table
+    def _show_directory_context_menu(self, pos):
+        table = self.dir_table
         item = table.itemAt(pos)
         if not item:
             return
-        row = item.row()
-        table.setCurrentCell(row, 0)
+        table.setCurrentCell(item.row(), 0)
 
+        row = item.row()
+        name_item = table.item(row, 0)
+        if not name_item:
+            return
+        path = name_item.data(Qt.UserRole)
+        if not path:
+            return
+
+        menu = self._build_directory_menu(row, path)
+        menu.exec(table.viewport().mapToGlobal(pos))
+
+    def _build_secret_menu(self, row):
+        table = self.secret_table
         key_item = table.item(row, 0)
         key = key_item.text() if key_item else ""
         path = self._secret_path or ""
@@ -1173,6 +1173,17 @@ class MainWindow(QMainWindow):
         )
         menu.addSeparator()
         menu.addAction("🔄 Обновить", self.refresh_active_view)
+        return menu
+
+    def _show_secret_context_menu(self, pos):
+        table = self.secret_table
+        item = table.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        table.setCurrentCell(row, 0)
+
+        menu = self._build_secret_menu(row)
         menu.exec(table.viewport().mapToGlobal(pos))
 
     def _copy_value_at_row(self, table, row):

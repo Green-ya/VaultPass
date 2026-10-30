@@ -48,6 +48,10 @@ class FakeClient:
 
     def create_secret(self, path, data):
         self.created.append((path, data))
+        parent = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+        name = path.rsplit("/", 1)[-1]
+        if name not in self.tree.setdefault(parent, []):
+            self.tree[parent].append(name)
         return True
 
     def delete_secret(self, path):
@@ -773,4 +777,319 @@ def test_secret_dialog_copy_uses_window_clipboard_policy(window):
     assert QApplication.clipboard().text() == "s3cret"
     # Копирование из диалога взводит общую автоочистку буфера
     assert window._clipboard_timer.isActive()
+    dialog.close()
+
+
+# ----------------------------------------------------------------------
+# Создание / редактирование секретов
+# ----------------------------------------------------------------------
+def _stub_secret_dialog(monkeypatch, path, data):
+    class StubDialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return 1
+
+        def get_secret(self):
+            return path, data
+
+    monkeypatch.setattr("ui.main_window.SecretDialog", StubDialog)
+
+
+def _answer_question(monkeypatch, module, yes):
+    class FakeMessageBox:
+        Yes = 1
+        No = 0
+
+        @staticmethod
+        def question(*args, **kwargs):
+            return 1 if yes else 0
+
+    monkeypatch.setattr(f"{module}.QMessageBox", FakeMessageBox)
+
+
+def test_create_secret_creates_new(window, monkeypatch):
+    client = FakeClient()
+    window.client = client
+    window.refresh(silent=True)
+    _stub_secret_dialog(monkeypatch, "new-secret", {"k": "v"})
+    monkeypatch.setattr(window, "_get_secret", lambda path, force=False: {})
+
+    window.create_secret()
+
+    assert client.created[-1] == ("new-secret", {"k": "v"})
+    assert window._active_path == "new-secret"
+    assert "Создан" in window.status_label.text()
+
+
+def test_create_secret_without_connection_warns(window):
+    window.create_secret()
+    assert "подключитесь" in window.status_label.text().lower()
+
+
+def test_create_secret_overwrite_confirmed(window, monkeypatch):
+    client = FakeClient()
+    window.client = client
+    window.refresh(silent=True)
+    _stub_secret_dialog(monkeypatch, "root-secret", {"k": "v"})
+    monkeypatch.setattr(
+        window, "_get_secret", lambda path, force=False: {"old": "1"}
+    )
+    _answer_question(monkeypatch, "ui.main_window", yes=True)
+
+    window.create_secret()
+
+    assert client.created[-1] == ("root-secret", {"k": "v"})
+    assert "Обновлён" in window.status_label.text()
+
+
+def test_create_secret_overwrite_cancelled(window, monkeypatch):
+    client = FakeClient()
+    window.client = client
+    window.refresh(silent=True)
+    _stub_secret_dialog(monkeypatch, "root-secret", {"k": "v"})
+    monkeypatch.setattr(
+        window, "_get_secret", lambda path, force=False: {"old": "1"}
+    )
+    _answer_question(monkeypatch, "ui.main_window", yes=False)
+
+    window.create_secret()
+
+    assert client.created == []
+    assert "отменено" in window.status_label.text().lower()
+
+
+def test_create_secret_client_error_reported(window, monkeypatch):
+    class BoomClient(FakeClient):
+        def create_secret(self, path, data):
+            raise RuntimeError("запись запрещена")
+
+    window.client = BoomClient()
+    window.refresh(silent=True)
+    _stub_secret_dialog(monkeypatch, "new-secret", {"k": "v"})
+    monkeypatch.setattr(window, "_get_secret", lambda path, force=False: {})
+
+    window.create_secret()
+
+    assert window.status_label.text().startswith("❌")
+    assert "запись запрещена" in window.status_label.text()
+
+
+def test_edit_secret_updates_data(window, monkeypatch):
+    client = FakeClient()
+    window.client = client
+    window.refresh(silent=True)
+    window.open_secret("root-secret")
+    _stub_secret_dialog(monkeypatch, "root-secret", {"k": "new"})
+
+    window.edit_secret("root-secret")
+
+    assert client.created[-1] == ("root-secret", {"k": "new"})
+    assert "обновлён" in window.status_label.text().lower()
+
+
+def test_edit_secret_empty_data_warns(window, monkeypatch):
+    client = FakeClient()
+    window.client = client
+    window.refresh(silent=True)
+    _stub_secret_dialog(monkeypatch, "root-secret", {})
+
+    window.edit_secret("root-secret")
+
+    assert client.created == []
+    assert "хотя бы одну пару" in window.status_label.text().lower()
+
+
+def test_edit_secret_read_error_reported(window):
+    class BoomClient(FakeClient):
+        def read_secret(self, path):
+            raise RuntimeError("нет доступа")
+
+    window.client = BoomClient()
+    window.edit_secret("root-secret")
+
+    assert window.status_label.text().startswith("❌")
+
+
+# ----------------------------------------------------------------------
+# Дерево: ленивая загрузка и навигация
+# ----------------------------------------------------------------------
+def test_tree_lazy_loads_on_expand(window):
+    window.client = FakeClient()
+    window.refresh(silent=True)
+
+    root = window.tree.topLevelItem(0)
+    folder = root.child(0)
+    assert folder.childCount() == 0
+
+    window.on_tree_expanded(folder)
+
+    assert folder.childCount() == 1
+    assert folder.child(0).data(0, Qt.UserRole) == "folder/nested"
+
+
+def test_ensure_tree_item_returns_none_for_missing(window):
+    window.client = FakeClient()
+    window.refresh(silent=True)
+
+    assert window._ensure_tree_item("does/not/exist") is None
+
+
+def test_navigate_to_missing_secret_uses_fallback(window):
+    window.client = FakeClient()
+    window.refresh(silent=True)
+
+    window._navigate_to("unknown/secret")
+
+    assert window._active_path == "unknown/secret"
+    assert window.content_stack.currentWidget() is window.secret_page
+
+
+def test_populate_tree_error_is_reported(window, caplog):
+    class BoomClient(FakeClient):
+        def list_secrets(self, path=""):
+            raise RuntimeError("boom-list")
+
+    window.client = BoomClient()
+
+    with caplog.at_level(logging.ERROR, logger="ui.main_window"):
+        window.refresh()
+
+    # Ошибка не должна затираться сообщением «Обновлено»
+    assert window.status_label.text().startswith("❌")
+    assert any("boom-list" in r.getMessage() for r in caplog.records)
+
+
+# ----------------------------------------------------------------------
+# Контекстные меню таблиц
+# ----------------------------------------------------------------------
+def test_directory_menu_filters_items_by_row_type(window):
+    window.client = FakeClient()
+    window.refresh(silent=True)
+
+    folder_menu = window._build_directory_menu(0, "folder/")
+    folder_texts = [
+        a.text() for a in folder_menu.actions() if not a.isSeparator()
+    ]
+    assert any("Открыть" in t for t in folder_texts)
+    assert not any("Удалить" in t for t in folder_texts)
+    folder_menu.deleteLater()
+
+    secret_menu = window._build_directory_menu(1, "root-secret")
+    secret_texts = [
+        a.text() for a in secret_menu.actions() if not a.isSeparator()
+    ]
+    assert any("Скопировать значение" in t for t in secret_texts)
+    assert any("Изменить" in t for t in secret_texts)
+    assert any("Удалить" in t for t in secret_texts)
+    secret_menu.deleteLater()
+
+
+def test_secret_menu_has_copy_and_delete(window):
+    window.client = FakeClient()
+    window.refresh(silent=True)
+    window.open_secret("root-secret")
+
+    menu = window._build_secret_menu(0)
+    texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+
+    assert any("Скопировать ключ" in t for t in texts)
+    assert any("Удалить секрет" in t for t in texts)
+    menu.deleteLater()
+
+
+# ----------------------------------------------------------------------
+# Двойной клик и кэш
+# ----------------------------------------------------------------------
+def test_double_click_on_directory_row_opens_secret(window):
+    window.client = FakeClient()
+    window.refresh(silent=True)
+
+    window.on_table_double_click(window.dir_table.item(1, 0))
+
+    assert window.content_stack.currentWidget() is window.secret_page
+    assert window._secret_path == "root-secret"
+
+
+def test_double_click_on_secret_row_copies_value(window):
+    window.client = FakeClient()
+    window.refresh(silent=True)
+    window.open_secret("root-secret")
+    QApplication.clipboard().clear()
+
+    window.on_table_double_click(window.secret_table.item(0, 1))
+
+    assert QApplication.clipboard().text() == "value-of-root-secret"
+
+
+def test_invalidate_cache_recursively_removes_prefix(window):
+    now = time.monotonic()
+    window._secret_cache = {
+        "team/db/prod": (now, {"k": "1"}),
+        "team/db/stage": (now, {"k": "2"}),
+        "team/api": (now, {"k": "3"}),
+    }
+
+    window._invalidate_cache("team/db")
+
+    assert set(window._secret_cache) == {"team/api"}
+
+
+def test_invalidate_cache_none_clears_all(window):
+    window._secret_cache = {"a": (time.monotonic(), {})}
+    window._invalidate_cache()
+    assert window._secret_cache == {}
+
+
+def test_copy_secret_data_joins_pairs(window):
+    window.copy_secret_data({"user": "alice", "password": "s3cret"})
+
+    text = QApplication.clipboard().text()
+    assert "user: alice" in text
+    assert "password: s3cret" in text
+
+
+# ----------------------------------------------------------------------
+# SecretDialog: удаление строки и get_secret
+# ----------------------------------------------------------------------
+def test_secret_dialog_remove_nonempty_row_confirms(window, monkeypatch):
+    dialog = SecretDialog(window)
+    dialog.table.setItem(0, 0, QTableWidgetItem("k"))
+    dialog.table.setItem(0, 1, QTableWidgetItem("v"))
+
+    _answer_question(monkeypatch, "ui.dialogs", yes=False)
+    dialog._remove_row(0)
+    assert dialog.table.rowCount() == 2
+
+    _answer_question(monkeypatch, "ui.dialogs", yes=True)
+    dialog._remove_row(0)
+    assert dialog.table.rowCount() == 1
+    dialog.close()
+
+
+def test_secret_dialog_get_secret_normalizes(window):
+    dialog = SecretDialog(window)
+    dialog.path_edit.setText(" /team/db/prod/ ")
+    dialog.table.setItem(0, 0, QTableWidgetItem(" user "))
+    dialog.table.setItem(0, 1, QTableWidgetItem("alice"))
+    dialog.table.setItem(1, 0, QTableWidgetItem(""))
+    dialog.table.setItem(1, 1, QTableWidgetItem("skip"))
+
+    path, data = dialog.get_secret()
+
+    assert path == "team/db/prod"
+    assert data == {"user": "alice"}
+    dialog.close()
+
+
+def test_config_dialog_empty_mount_defaults_to_secret(window):
+    dialog = ConfigDialog(window)
+    dialog.url_edit.setText("https://vault.local")
+    dialog.token_edit.setText("token")
+    dialog.mount_edit.setText("")
+
+    _, _, mount = dialog.get_config()
+
+    assert mount == "secret"
     dialog.close()
