@@ -54,6 +54,10 @@ class MainWindow(QMainWindow):
     PREVIEW_LIMIT = 30  # сколько значений подгружать сразу в списке каталога
     MASK_CHARS = 12  # фиксированное число символов в маскированном значении
 
+    # Единые таймауты автоскрытия сообщений в статусной строке.
+    INFO_TIMEOUT_MS = 5000
+    WARN_TIMEOUT_MS = 8000
+
     def __init__(self):
         super().__init__()
         self.config_manager = ConfigManager()
@@ -69,6 +73,8 @@ class MainWindow(QMainWindow):
         self._clipboard_value = None
         self._clipboard_deadline = None
         self._last_error = False
+        # Действие для повтора последней неудачной операции (см. retry_last_action).
+        self._retry_action = None
 
         self.setWindowTitle("VaultPass - Менеджер паролей")
         self.setGeometry(100, 100, 1100, 750)
@@ -112,18 +118,18 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Уведомления — единая точка вывода в статусную строку
     # ------------------------------------------------------------------
-    def _notify(self, text, timeout=5000):
+    def _notify(self, text, timeout=INFO_TIMEOUT_MS):
         self.status_label.setText(text)
         self._status_timer.stop()
         if timeout and timeout > 0:
             self._status_timer.start(timeout)
 
-    def info(self, text, timeout=5000):
+    def info(self, text, timeout=INFO_TIMEOUT_MS):
         """Информационное сообщение в статусной строке."""
         self._last_error = False
         self._notify(text, timeout)
 
-    def warn(self, text, timeout=8000):
+    def warn(self, text, timeout=WARN_TIMEOUT_MS):
         """Предупреждение в статусной строке."""
         self._last_error = False
         self._notify(text, timeout)
@@ -139,13 +145,31 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Обработка ошибок: в лог — детали, пользователю — понятный текст
     # ------------------------------------------------------------------
-    def _report_error(self, message, exc=None, level=logging.ERROR):
+    def _report_error(self, message, exc=None, level=logging.ERROR, retry=None):
         """Логирует технические детали и показывает пользователю понятный текст.
 
         ``exc`` передаётся в лог как traceback; секреты сюда не попадают.
+        ``retry`` — необязательная функция, повторяющая неудачную операцию
+        (см. пункт меню «Повторить последнее действие»).
         """
         logger.log(level, "%s", message, exc_info=exc)
+        self._set_retry_action(retry)
         self.error(f"❌ {message}")
+
+    def _set_retry_action(self, retry):
+        self._retry_action = retry
+        if hasattr(self, "retry_action"):
+            self.retry_action.setEnabled(retry is not None)
+
+    def retry_last_action(self):
+        """Повторяет последнюю неудачную операцию, если она известна."""
+        if self._retry_action is None:
+            self.warn("Нечего повторять")
+            return
+        action, self._retry_action = self._retry_action, None
+        if hasattr(self, "retry_action"):
+            self.retry_action.setEnabled(False)
+        action()
 
     # ------------------------------------------------------------------
     # Вспомогательные методы
@@ -262,6 +286,12 @@ class MainWindow(QMainWindow):
         self.refresh_action.triggered.connect(self.refresh)
         edit_menu.addAction(self.refresh_action)
 
+        self.retry_action = QAction("Повторить последнее действие", self)
+        self.retry_action.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        self.retry_action.setEnabled(False)
+        self.retry_action.triggered.connect(self.retry_last_action)
+        edit_menu.addAction(self.retry_action)
+
         view_menu = menubar.addMenu("Вид")
         debug_action = QAction("Режим отладки", self)
         debug_action.setCheckable(True)
@@ -363,7 +393,9 @@ class MainWindow(QMainWindow):
         self.tree.setHeaderHidden(True)
         self.tree.setIconSize(QSize(20, 20))
         self.tree.setExpandsOnDoubleClick(False)
+        self.tree.setFocusPolicy(Qt.StrongFocus)
         self.tree.itemExpanded.connect(self.on_tree_expanded)
+        self.tree.itemActivated.connect(self.on_tree_activated)
         self.tree.currentItemChanged.connect(self.on_tree_current_changed)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(
@@ -419,6 +451,10 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(right_panel)
         splitter.setSizes([300, 700])
+
+        # Дерево — основной элемент навигации: отдаём ему фокус при старте,
+        # чтобы сразу работали стрелки/Enter без клика мышью.
+        self.tree.setFocus()
 
     def _create_empty_page(self) -> QWidget:
         page = QWidget()
@@ -554,6 +590,7 @@ class MainWindow(QMainWindow):
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setFocusPolicy(Qt.StrongFocus)
 
     # ------------------------------------------------------------------
     # Подключение
@@ -571,7 +608,7 @@ class MainWindow(QMainWindow):
                 save=False,
             )
         except Exception as e:
-            self._report_error(f"Ошибка: {e}", e)
+            self._report_error(f"Ошибка: {e}", e, retry=self._load_config)
 
     def _connect_to_vault(self, url, token, mount_point, save=True):
         client = VaultClient(url, token, mount_point)
@@ -596,7 +633,9 @@ class MainWindow(QMainWindow):
         try:
             self._connect_to_vault(url, token, mount)
         except Exception as e:
-            self._report_error(str(e), e)
+            self._report_error(
+                str(e), e, retry=self.show_config_dialog
+            )
 
     def disconnect_from_vault(self):
         """Отключается от Vault и вычищает секреты из памяти."""
@@ -727,7 +766,13 @@ class MainWindow(QMainWindow):
             items = self.client.list_secrets(path)
         except Exception as e:
             if show_errors:
-                self._report_error(f"Не удалось загрузить {path or '/'}: {e}", e)
+                self._report_error(
+                    f"Не удалось загрузить {path or '/'}: {e}",
+                    e,
+                    retry=lambda: self._populate_tree(
+                        parent_item, path, show_errors
+                    ),
+                )
             return
 
         for item in items:
@@ -753,6 +798,19 @@ class MainWindow(QMainWindow):
             return
 
         self._populate_tree(item, path)
+
+    def on_tree_activated(self, item, _column=0):
+        """Enter или двойной клик: папку раскрываем, секрет показываем."""
+        if item is None:
+            return
+        path = item.data(0, Qt.UserRole)
+        if path is None:
+            return
+
+        if path == "" or path.endswith("/"):
+            item.setExpanded(not item.isExpanded())
+        else:
+            self._show_tree_item(item)
 
     def on_tree_current_changed(self, current, _previous):
         if current is None:
@@ -856,7 +914,11 @@ class MainWindow(QMainWindow):
         try:
             data = self._get_secret(path)
         except Exception as e:
-            self._report_error(f"Не удалось загрузить секрет: {e}", e)
+            self._report_error(
+                f"Не удалось загрузить секрет: {e}",
+                e,
+                retry=lambda: self.show_secret(path),
+            )
             return
 
         self._active_path = path
@@ -876,7 +938,11 @@ class MainWindow(QMainWindow):
         try:
             items = self.client.list_secrets(path)
         except Exception as e:
-            self._report_error(f"Не удалось загрузить {path or '/'}: {e}", e)
+            self._report_error(
+                f"Не удалось загрузить {path or '/'}: {e}",
+                e,
+                retry=lambda: self.load_directory(path),
+            )
             return
 
         prefix = (path or "").rstrip("/")
@@ -1194,7 +1260,9 @@ class MainWindow(QMainWindow):
         try:
             data = self._get_secret(path)
         except Exception as e:
-            self._report_error(str(e), e)
+            self._report_error(
+                str(e), e, retry=lambda: self._copy_value_at_row(table, row)
+            )
             return
         value = next(iter(data.values()), "")
         if value:
@@ -1309,7 +1377,9 @@ class MainWindow(QMainWindow):
                 f"✅ {'Обновлён' if existing else 'Создан'} секрет: {path}"
             )
         except Exception as e:
-            self._report_error(str(e), e)
+            self._report_error(
+                str(e), e, retry=lambda: self._create_secret(directory)
+            )
 
     def edit_secret(self, path):
         if not self.client or not path:
@@ -1318,7 +1388,9 @@ class MainWindow(QMainWindow):
         try:
             data = self._get_secret(path, force=True)
         except Exception as e:
-            self._report_error(str(e), e)
+            self._report_error(
+                str(e), e, retry=lambda: self.edit_secret(path)
+            )
             return
 
         dialog = SecretDialog(self, existing_path=path, existing_data=data)
@@ -1337,7 +1409,9 @@ class MainWindow(QMainWindow):
             self.refresh(silent=True)
             self.info(f"✅ Секрет обновлён: {new_path}")
         except Exception as e:
-            self._report_error(str(e), e)
+            self._report_error(
+                str(e), e, retry=lambda: self.edit_secret(path)
+            )
 
     def rename_secret(self, path):
         """Переименовывает секрет: read → write → delete (папки не трогаем)."""
@@ -1374,7 +1448,9 @@ class MainWindow(QMainWindow):
             self.refresh(silent=True)
             self.info(f"✏️ Переименован: {path} → {new_path}")
         except Exception as e:
-            self._report_error(str(e), e)
+            self._report_error(
+                str(e), e, retry=lambda: self.rename_secret(path)
+            )
 
     def _selected_secret_for_deletion(self):
         """Возвращает путь секрета, который сейчас выбран для удаления."""
@@ -1454,7 +1530,9 @@ class MainWindow(QMainWindow):
             self.refresh(silent=True)
             self.info(f"🗑️ Удалён: {path}")
         except Exception as e:
-            self._report_error(str(e), e)
+            self._report_error(
+                str(e), e, retry=lambda: self.delete_secret_path(path)
+            )
 
     # ------------------------------------------------------------------
     # Поиск

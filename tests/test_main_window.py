@@ -1142,3 +1142,101 @@ def test_window_boots_with_keyring_available(app, tmp_path, monkeypatch):
     keyring_window.close()
     keyring_window.deleteLater()
     app.processEvents()
+
+
+# ----------------------------------------------------------------------
+# Единые таймауты уведомлений
+# ----------------------------------------------------------------------
+def test_info_and_warn_use_unified_timeouts(window):
+    window.info("ок")
+    assert window._status_timer.interval() == MainWindow.INFO_TIMEOUT_MS
+
+    window.warn("осторожно")
+    assert window._status_timer.interval() == MainWindow.WARN_TIMEOUT_MS
+
+
+# ----------------------------------------------------------------------
+# Повтор последней неудачной операции
+# ----------------------------------------------------------------------
+def test_retry_action_disabled_when_nothing_to_retry(window):
+    assert window._retry_action is None
+    assert not window.retry_action.isEnabled()
+
+    window.retry_last_action()
+
+    assert "нечего повторять" in window.status_label.text().lower()
+
+
+def test_error_enables_retry_action(window):
+    class BoomClient(FakeClient):
+        def list_secrets(self, path=""):
+            raise RuntimeError("сеть недоступна")
+
+    window.client = BoomClient()
+    window.load_directory("")
+
+    assert window.retry_action.isEnabled()
+    assert window._retry_action is not None
+
+
+def test_retry_last_action_reruns_failed_operation(window):
+    client = FakeClient()
+    original = client.list_secrets
+    attempts = {"n": 0}
+
+    def flaky(path=""):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("временный сбой")
+        return original(path)
+
+    client.list_secrets = flaky
+    window.client = client
+
+    window.load_directory("")
+    assert window.status_label.text().startswith("❌")
+    assert window.retry_action.isEnabled()
+
+    window.retry_last_action()
+
+    assert window.dir_table.rowCount() == 2
+    assert not window.retry_action.isEnabled()
+    assert window._retry_action is None
+
+
+# ----------------------------------------------------------------------
+# Фокус и навигация с клавиатуры
+# ----------------------------------------------------------------------
+def test_tree_and_tables_take_strong_focus(window):
+    assert window.tree.focusPolicy() == Qt.StrongFocus
+    assert window.dir_table.focusPolicy() == Qt.StrongFocus
+    assert window.secret_table.focusPolicy() == Qt.StrongFocus
+
+
+def test_enter_on_folder_toggles_expansion_and_lazy_loads(window):
+    window.client = FakeClient()
+    window.refresh(silent=True)
+
+    root = window.tree.topLevelItem(0)
+    folder = root.child(0)
+    assert not folder.isExpanded()
+
+    window.on_tree_activated(folder)
+
+    assert folder.isExpanded()
+    assert folder.childCount() == 1
+
+    window.on_tree_activated(folder)
+    assert not folder.isExpanded()
+
+
+def test_enter_on_secret_opens_it(window):
+    window.client = FakeClient()
+    window.refresh(silent=True)
+
+    root = window.tree.topLevelItem(0)
+    secret = root.child(1)
+    window.on_tree_activated(secret)
+
+    assert window._secret_path == "root-secret"
+    assert window.content_stack.currentWidget() is window.secret_page
