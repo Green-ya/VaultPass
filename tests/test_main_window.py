@@ -20,6 +20,7 @@ class FakeClient:
             "folder/": ["nested"],
         }
         self.deleted = []
+        self.created = []
 
     def list_secrets(self, path=""):
         return self.tree.get(path, [])
@@ -40,6 +41,7 @@ class FakeClient:
         return {"password": f"value-of-{path}", "user": "alice"}
 
     def create_secret(self, path, data):
+        self.created.append((path, data))
         return True
 
     def delete_secret(self, path):
@@ -566,3 +568,125 @@ def test_connect_starts_and_disconnect_stops_cache_timer(window, monkeypatch):
 
     window.disconnect_from_vault()
     assert not window._cache_timer.isActive()
+
+
+def test_secret_dialog_prefills_default_path(window):
+    dialog = SecretDialog(window, default_path="team/db/")
+
+    assert dialog.path_edit.text() == "team/db/"
+    assert dialog.path_edit.isEnabled()
+    dialog.close()
+
+
+def test_secret_dialog_existing_path_locks_field(window):
+    dialog = SecretDialog(
+        window, existing_path="team/db/prod", existing_data={"k": "v"}
+    )
+
+    assert dialog.path_edit.text() == "team/db/prod"
+    assert not dialog.path_edit.isEnabled()
+    dialog.close()
+
+
+def test_active_directory_from_selection(window):
+    window._active_path = ""
+    assert window._active_directory() == ""
+
+    window._active_path = "folder/"
+    assert window._active_directory() == "folder/"
+
+    window._active_path = "folder/nested"
+    assert window._active_directory() == "folder/"
+
+    window._active_path = "root-secret"
+    assert window._active_directory() == ""
+
+
+def test_create_secret_uses_active_directory(window, monkeypatch):
+    captured = {}
+
+    class StubDialog:
+        def __init__(self, parent=None, default_path="", **kwargs):
+            captured["default_path"] = default_path
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr("ui.main_window.SecretDialog", StubDialog)
+
+    window.client = FakeClient()
+    window._active_path = "folder/"
+    window.create_secret()
+
+    assert captured["default_path"] == "folder/"
+
+
+def test_tree_menu_for_directory_offers_new_secret(window):
+    menu = window._build_tree_menu("folder/")
+    texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+
+    assert any("Новый секрет" in t for t in texts)
+    assert not any("Переименовать" in t for t in texts)
+    assert not any("Удалить" in t for t in texts)
+    menu.deleteLater()
+
+
+def test_tree_menu_for_secret_offers_rename_and_delete(window):
+    menu = window._build_tree_menu("root-secret")
+    texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+
+    assert any("Переименовать" in t for t in texts)
+    assert any("Удалить" in t for t in texts)
+    assert not any("Новый секрет" in t for t in texts)
+    menu.deleteLater()
+
+
+def test_rename_secret_reads_writes_deletes(window, monkeypatch):
+    client = FakeClient()
+    window.client = client
+    window.refresh(silent=True)
+    window.open_secret("root-secret")
+
+    monkeypatch.setattr(
+        "ui.main_window.QInputDialog.getText",
+        staticmethod(lambda *args, **kwargs: ("renamed-secret", True)),
+    )
+
+    window.rename_secret("root-secret")
+
+    assert client.created[-1][0] == "renamed-secret"
+    assert client.deleted == ["root-secret"]
+    assert window._secret_path == "renamed-secret"
+    assert "Переименован" in window.status_label.text()
+
+
+def test_rename_secret_cancelled_is_noop(window, monkeypatch):
+    client = FakeClient()
+    window.client = client
+    window.refresh(silent=True)
+
+    monkeypatch.setattr(
+        "ui.main_window.QInputDialog.getText",
+        staticmethod(lambda *args, **kwargs: ("", False)),
+    )
+
+    window.rename_secret("root-secret")
+
+    assert client.created == []
+    assert client.deleted == []
+
+
+def test_rename_secret_unchanged_path_is_noop(window, monkeypatch):
+    client = FakeClient()
+    window.client = client
+    window.refresh(silent=True)
+
+    monkeypatch.setattr(
+        "ui.main_window.QInputDialog.getText",
+        staticmethod(lambda *args, **kwargs: ("root-secret", True)),
+    )
+
+    window.rename_secret("root-secret")
+
+    assert client.created == []
+    assert client.deleted == []

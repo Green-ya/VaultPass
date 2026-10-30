@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -359,6 +360,10 @@ class MainWindow(QMainWindow):
         self.tree.setExpandsOnDoubleClick(False)
         self.tree.itemExpanded.connect(self.on_tree_expanded)
         self.tree.currentItemChanged.connect(self.on_tree_current_changed)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(
+            self._show_tree_context_menu
+        )
         self.tree.setStyleSheet(
             """
             QTreeWidget::item { padding: 4px; }
@@ -752,6 +757,52 @@ class MainWindow(QMainWindow):
             self.show_directory(path)
         else:
             self.show_secret(path)
+
+    def _build_tree_menu(self, path):
+        """Собирает контекстное меню узла дерева (П2)."""
+        is_dir = path == "" or path.endswith("/")
+        menu = QMenu(self)
+
+        if is_dir:
+            new_action = menu.addAction("➕ Новый секрет здесь")
+            new_action.triggered.connect(
+                lambda _checked=False: self._create_secret(path)
+            )
+            open_action = menu.addAction("📂 Открыть")
+            open_action.triggered.connect(
+                lambda _checked=False: self._navigate_to(path)
+            )
+        else:
+            open_action = menu.addAction("📂 Открыть")
+            open_action.triggered.connect(
+                lambda _checked=False: self._navigate_to(path)
+            )
+            rename_action = menu.addAction("✏️ Переименовать…")
+            rename_action.triggered.connect(
+                lambda _checked=False: self.rename_secret(path)
+            )
+            delete_action = menu.addAction("🗑️ Удалить…")
+            delete_action.triggered.connect(
+                lambda _checked=False: self.delete_secret_path(path)
+            )
+
+        menu.addSeparator()
+        refresh_action = menu.addAction("🔄 Обновить")
+        refresh_action.triggered.connect(lambda _checked=False: self.refresh())
+
+        return menu
+
+    def _show_tree_context_menu(self, pos):
+        item = self.tree.itemAt(pos)
+        if item is None:
+            return
+
+        path = item.data(0, Qt.UserRole)
+        if path is None:
+            return
+
+        menu = self._build_tree_menu(path)
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     # ------------------------------------------------------------------
     # Навигация
@@ -1178,12 +1229,22 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Создание / редактирование / удаление
     # ------------------------------------------------------------------
+    def _active_directory(self):
+        """Каталог, в контексте которого создаётся новый секрет (П1)."""
+        path = self._active_path or ""
+        if path and not path.endswith("/"):
+            path = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+        return path
+
     def create_secret(self):
+        self._create_secret(self._active_directory())
+
+    def _create_secret(self, directory=""):
         if not self.client:
             self.warn("Сначала подключитесь")
             return
 
-        dialog = SecretDialog(self)
+        dialog = SecretDialog(self, default_path=directory)
         if not dialog.exec():
             return
 
@@ -1242,6 +1303,43 @@ class MainWindow(QMainWindow):
             self._active_path = new_path
             self.refresh(silent=True)
             self.info(f"✅ Секрет обновлён: {new_path}")
+        except Exception as e:
+            self._report_error(str(e), e)
+
+    def rename_secret(self, path):
+        """Переименовывает секрет: read → write → delete (папки не трогаем)."""
+        if not self.client or not path:
+            return
+
+        new_path, ok = QInputDialog.getText(
+            self,
+            "Переименовать секрет",
+            "Новый путь:",
+            text=path,
+        )
+        if not ok:
+            return
+
+        new_path = (new_path or "").strip().strip("/")
+        if not new_path or new_path == path:
+            return
+
+        try:
+            data = self._get_secret(path, force=True)
+            if not data:
+                self.warn(f"Секрет не найден: {path}")
+                return
+
+            self.client.create_secret(new_path, data)
+            self.client.delete_secret(path)
+            self._invalidate_cache(path)
+            self._invalidate_cache(new_path)
+            if self._secret_path == path:
+                self._secret_path = new_path
+            if self._active_path == path:
+                self._active_path = new_path
+            self.refresh(silent=True)
+            self.info(f"✏️ Переименован: {path} → {new_path}")
         except Exception as e:
             self._report_error(str(e), e)
 

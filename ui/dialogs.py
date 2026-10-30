@@ -137,7 +137,13 @@ class ConfigDialog(QDialog):
 class SecretDialog(QDialog):
     """Диалог создания/редактирования секрета с несколькими парами ключ-значение."""
 
-    def __init__(self, parent=None, existing_path="", existing_data=None):
+    def __init__(
+        self,
+        parent=None,
+        existing_path="",
+        existing_data=None,
+        default_path="",
+    ):
         super().__init__(parent)
         self.setWindowTitle(
             "Создать секрет" if not existing_path else "Редактировать секрет"
@@ -154,6 +160,10 @@ class SecretDialog(QDialog):
         if existing_path:
             self.path_edit.setText(existing_path)
             self.path_edit.setEnabled(False)  # Не даём менять путь при редактировании
+        elif default_path:
+            # П1: подставляем путь активной директории, чтобы не набирать вручную.
+            self.path_edit.setText(default_path)
+            self.path_edit.setCursorPosition(len(default_path))
         form.addRow("Путь:", self.path_edit)
         layout.addLayout(form)
 
