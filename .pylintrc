@@ -1,0 +1,33 @@
+[MAIN]
+# Позволяет pylint находить модули проекта (logging_setup и т.п.)
+init-hook=import sys; sys.path.insert(0, ".")
+
+[MESSAGES CONTROL]
+# Отключаем стилевые и заведомо шумные проверки для Qt-кода:
+# docstring'ов в проекте нет по соглашению, а динамические атрибуты PySide6
+# не поддаются статическому анализу.
+disable=
+    invalid-name,
+    missing-module-docstring,
+    missing-class-docstring,
+    missing-function-docstring,
+    no-name-in-module,
+    too-many-lines,
+    too-many-public-methods,
+    too-few-public-methods,
+    duplicate-code,
+    protected-access,
+    redefined-outer-name,
+    broad-exception-caught,
+    wrong-import-position,
+    attribute-defined-outside-init,
+    unused-argument,
+    use-implicit-booleaness-not-comparison,
+    too-many-locals,
+    too-many-branches,
+    too-many-return-statements,
+    too-many-statements,
+    too-many-instance-attributes
+
+[FORMAT]
+max-line-length=88

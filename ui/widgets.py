@@ -1,7 +1,6 @@
 """Небольшие переиспользуемые виджеты."""
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import QTableWidget
 
 
@@ -14,7 +13,7 @@ class CopyableTable(QTableWidget):
 
     copy_requested = Signal(int)
 
-    def keyPressEvent(self, event):
+    def keyPressEvent(self, event):  # pylint: disable=invalid-name
         if event.key() == Qt.Key_C and event.modifiers() == Qt.ControlModifier:
             row = self.currentRow()
             if row >= 0:
@@ -27,6 +26,8 @@ class CopyableTable(QTableWidget):
 class ConfirmOnCtrlShiftEnter:
     """Миксин для диалогов: Ctrl+Shift+Enter подтверждает ввод."""
 
+    # Диалог-наследник предоставляет accept() и keyPressEvent().
+    # pylint: disable=no-member
     def keyPressEvent(self, event):
         ctrl_shift = (
             event.modifiers() & Qt.ControlModifier
