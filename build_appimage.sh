@@ -66,5 +66,11 @@ chmod +x appimagetool-x86_64.AppImage
 OUTPUT="VaultPass-x86_64.AppImage"
 TMP_OUTPUT="${OUTPUT}.new"
 rm -f "$TMP_OUTPUT"
-ARCH=x86_64 ./appimagetool-x86_64.AppImage AppDir "$TMP_OUTPUT"
+# appimagetool — сам AppImage: без прав на FUSE (частый случай в контейнерах и
+# песочницах) монтирование падает. Тогда запускаем его в режиме распаковки.
+if ! ARCH=x86_64 ./appimagetool-x86_64.AppImage AppDir "$TMP_OUTPUT"; then
+    echo "Прямой запуск appimagetool не удался, пробуем APPIMAGE_EXTRACT_AND_RUN=1…"
+    rm -f "$TMP_OUTPUT"
+    APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 ./appimagetool-x86_64.AppImage AppDir "$TMP_OUTPUT"
+fi
 mv -f "$TMP_OUTPUT" "$OUTPUT"
