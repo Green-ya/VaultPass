@@ -177,19 +177,43 @@ def test_secret_eye_toggles_only_its_row(window):
 def test_clipboard_countdown_and_cleanup(window):
     window.copy_to_clipboard("top-secret-value")
 
+    assert "top-secret-value" not in window.clipboard_label.text()
     assert "top-secret-value" not in window.status_label.text()
     assert QApplication.clipboard().text() == "top-secret-value"
-    assert "30 с" in window.status_label.text()
+    assert "30 с" in window.clipboard_label.text()
 
     window._clipboard_deadline = time.monotonic() + 10
     window._update_clipboard_countdown()
-    assert "10 с" in window.status_label.text()
+    assert "10 с" in window.clipboard_label.text()
 
     window._clipboard_deadline = time.monotonic() - 1
     window._update_clipboard_countdown()
 
     assert QApplication.clipboard().text() == ""
-    assert "очищен" in window.status_label.text()
+    assert "очищен" in window.clipboard_label.text()
+    assert not window._clipboard_timer.isActive()
+
+
+def test_status_message_survives_clipboard_countdown(window):
+    window.copy_to_clipboard("top-secret-value")
+    window.status_label.setText("✅ Секрет создан")
+
+    window._clipboard_deadline = time.monotonic() + 15
+    window._update_clipboard_countdown()
+
+    # Счётчик буфера не затирает уведомление в статусной строке
+    assert window.status_label.text() == "✅ Секрет создан"
+    assert "15 с" in window.clipboard_label.text()
+
+
+def test_close_clears_clipboard_and_cache(window):
+    window.copy_to_clipboard("top-secret-value")
+    window._secret_cache["some/secret"] = (time.monotonic(), {"k": "v"})
+
+    window.close()
+
+    assert QApplication.clipboard().text() == ""
+    assert window._secret_cache == {}
     assert not window._clipboard_timer.isActive()
 
 

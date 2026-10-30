@@ -80,6 +80,16 @@ class MainWindow(QMainWindow):
         self._load_config()
 
     # ------------------------------------------------------------------
+    # Жизненный цикл окна
+    # ------------------------------------------------------------------
+    def closeEvent(self, event):
+        """При закрытии окна очищаем буфер обмена и секреты из памяти."""
+        self._clear_clipboard()
+        self._clipboard_timer.stop()
+        self._secret_cache.clear()
+        super().closeEvent(event)
+
+    # ------------------------------------------------------------------
     # Вспомогательные методы
     # ------------------------------------------------------------------
     def debug_log(self, *args):
@@ -234,6 +244,13 @@ class MainWindow(QMainWindow):
         panel_layout.addWidget(self.btn_search)
 
         panel_layout.addStretch()
+
+        # Отдельная метка для состояния буфера обмена: раньше счётчик
+        # автоочистки каждые 250 мс перезаписывал status_label и затирал
+        # любые уведомления. Теперь статус и буфер не мешают друг другу.
+        self.clipboard_label = QLabel("")
+        self.clipboard_label.setStyleSheet("color: #666;")
+        panel_layout.addWidget(self.clipboard_label)
 
         self.status_label = QLabel("Не подключено")
         panel_layout.addWidget(self.status_label)
@@ -1021,6 +1038,7 @@ class MainWindow(QMainWindow):
     def _update_clipboard_countdown(self):
         if self._clipboard_value is None or self._clipboard_deadline is None:
             self._clipboard_timer.stop()
+            self.clipboard_label.setText("")
             return
 
         remaining = math.ceil(self._clipboard_deadline - time.monotonic())
@@ -1028,8 +1046,8 @@ class MainWindow(QMainWindow):
             self._clear_clipboard()
             return
 
-        self.status_label.setText(
-            f"📋 Скопировано. Буфер очистится через {remaining} с"
+        self.clipboard_label.setText(
+            f"📋 Буфер очистится через {remaining} с"
         )
 
     def _clear_clipboard(self):
@@ -1044,9 +1062,7 @@ class MainWindow(QMainWindow):
         self._clipboard_value = None
         self._clipboard_deadline = None
         self._clipboard_timer.stop()
-        self.status_label.setText(
-            "🧹 Буфер обмена очищен" if cleared else "Готово"
-        )
+        self.clipboard_label.setText("🧹 Буфер обмена очищен" if cleared else "")
 
     def copy_secret_data(self, data):
         text = "\n".join(f"{k}: {v}" for k, v in data.items())
