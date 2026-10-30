@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from config_manager import ConfigManager
+from ui.widgets import ConfirmOnCtrlShiftEnter, CopyableTable
 
 PASSWORD_SYMBOLS = "!@#$%^&*()-_=+[]{};:,.?/"
 
@@ -57,7 +58,7 @@ def generate_password(
     return "".join(password)
 
 
-class ConfigDialog(QDialog):
+class ConfigDialog(ConfirmOnCtrlShiftEnter, QDialog):
     """Диалог настроек подключения к Vault."""
 
     def __init__(self, parent=None):
@@ -134,7 +135,7 @@ class ConfigDialog(QDialog):
         )
 
 
-class SecretDialog(QDialog):
+class SecretDialog(ConfirmOnCtrlShiftEnter, QDialog):
     """Диалог создания/редактирования секрета с несколькими парами ключ-значение."""
 
     def __init__(
@@ -247,12 +248,13 @@ class SecretDialog(QDialog):
         layout.addWidget(buttons)
 
     def _create_table(self) -> QTableWidget:
-        table = QTableWidget()
+        table = CopyableTable()
         table.setColumnCount(2)
         table.setHorizontalHeaderLabels(["Ключ", "Значение"])
         table.horizontalHeader().setStretchLastSection(True)
         table.setContextMenuPolicy(Qt.CustomContextMenu)
         table.customContextMenuRequested.connect(self._show_context_menu)
+        table.copy_requested.connect(self._copy_row_value)
         return table
 
     def _show_context_menu(self, pos):
@@ -273,7 +275,14 @@ class SecretDialog(QDialog):
 
     def _copy_row_value(self, row):
         item = self.table.item(row, 1)
-        if item and item.text():
+        if not (item and item.text()):
+            return
+        # Копируем через окно, чтобы сработала общая политика автоочистки
+        # буфера обмена, а не «сырой» setText мимо неё.
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "copy_to_clipboard"):
+            parent.copy_to_clipboard(item.text())
+        else:
             QApplication.clipboard().setText(item.text())
 
     def add_empty_row(self):

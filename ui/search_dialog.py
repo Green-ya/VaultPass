@@ -13,11 +13,11 @@ from PySide6.QtWidgets import (
     QMenu,
     QProgressDialog,
     QPushButton,
-    QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
 )
 
+from ui.widgets import CopyableTable
 from vault_client import VaultClientError
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ class SearchDialog(QDialog):
         options_layout.addWidget(self.status_label)
         layout.addLayout(options_layout)
 
-        self.results = QTableWidget()
+        self.results = CopyableTable()
         self.results.setColumnCount(3)
         self.results.setHorizontalHeaderLabels(["Путь", "Ключ", "Значение"])
         self.results.horizontalHeader().setStretchLastSection(True)
@@ -67,6 +67,9 @@ class SearchDialog(QDialog):
         self.results.itemDoubleClicked.connect(lambda _item: self.open_selected())
         self.results.setContextMenuPolicy(Qt.CustomContextMenu)
         self.results.customContextMenuRequested.connect(self._show_context_menu)
+        self.results.copy_requested.connect(
+            lambda _row: self.copy_selected_value()
+        )
         layout.addWidget(self.results)
 
         buttons = QDialogButtonBox()

@@ -42,6 +42,7 @@ from logging_setup import set_debug
 from resource_utils import get_resource_path
 from ui.dialogs import ConfigDialog, DeleteSecretDialog, SecretDialog
 from ui.search_dialog import SearchDialog
+from ui.widgets import CopyableTable
 from vault_client import VaultClient
 
 logger = logging.getLogger(__name__)
@@ -436,11 +437,14 @@ class MainWindow(QMainWindow):
         self.dir_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.dir_path_label)
 
-        self.dir_table = QTableWidget()
+        self.dir_table = CopyableTable()
         self.dir_table.setColumnCount(4)
         self.dir_table.setHorizontalHeaderLabels(["Имя", "Значение", "Тип", ""])
         self._configure_table(self.dir_table)
         self.dir_table.itemDoubleClicked.connect(self.on_table_double_click)
+        self.dir_table.copy_requested.connect(
+            lambda row: self._copy_row_value(self.dir_table, row)
+        )
         self.dir_table.itemSelectionChanged.connect(
             lambda: self.on_table_selection_changed(self.dir_table)
         )
@@ -495,11 +499,14 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(header_layout)
 
-        self.secret_table = QTableWidget()
+        self.secret_table = CopyableTable()
         self.secret_table.setColumnCount(3)
         self.secret_table.setHorizontalHeaderLabels(["Ключ", "Значение", ""])
         self._configure_table(self.secret_table)
         self.secret_table.itemDoubleClicked.connect(self.on_table_double_click)
+        self.secret_table.copy_requested.connect(
+            lambda row: self._copy_row_value(self.secret_table, row)
+        )
         self.secret_table.cellClicked.connect(
             lambda row, col: self._on_table_cell_clicked(
                 self.secret_table, row, col, eye_column=2
@@ -1080,6 +1087,21 @@ class MainWindow(QMainWindow):
         real_value = value_item.data(Qt.UserRole + 1)
         if real_value:
             self.copy_to_clipboard(real_value)
+
+    def _copy_row_value(self, table, row):
+        """Ctrl+C: копирует реальное значение строки (не маску)."""
+        if table is self.secret_table:
+            self._copy_table_value(table, row)
+            return
+
+        # Таблица каталога: у папок значения нет.
+        if self._is_folder_row(table, row):
+            return
+        self._copy_table_value(table, row)
+        value_item = table.item(row, 1)
+        if value_item is None or not value_item.data(Qt.UserRole + 1):
+            # В большом каталоге значение подгружается лениво — читаем его.
+            self._copy_value_at_row(table, row)
 
     def _show_directory_context_menu(self, pos):
         table = self.dir_table

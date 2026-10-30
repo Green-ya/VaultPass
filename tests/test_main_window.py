@@ -3,7 +3,13 @@ import time
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QPushButton,
+    QTableWidgetItem,
+)
 
 import config_manager as config_module
 from config_manager import ConfigManager
@@ -690,3 +696,81 @@ def test_rename_secret_unchanged_path_is_noop(window, monkeypatch):
 
     assert client.created == []
     assert client.deleted == []
+
+
+def test_ctrl_c_copies_real_value_from_secret_table(window):
+    window.client = FakeClient()
+    window.refresh(silent=True)
+    window.open_secret("root-secret")
+
+    window.secret_table.setCurrentCell(0, 1)
+    QTest.keyClick(window.secret_table, Qt.Key_C, Qt.ControlModifier)
+
+    assert QApplication.clipboard().text() == "value-of-root-secret"
+
+
+def test_ctrl_c_copies_real_value_from_directory_table(window):
+    window.client = FakeClient()
+    window.refresh(silent=True)
+
+    window.dir_table.setCurrentCell(1, 0)
+    QTest.keyClick(window.dir_table, Qt.Key_C, Qt.ControlModifier)
+
+    assert QApplication.clipboard().text() == "value-of-root-secret"
+
+
+def test_ctrl_c_on_folder_row_copies_nothing(window):
+    window.client = FakeClient()
+    window.refresh(silent=True)
+    QApplication.clipboard().clear()
+
+    window.dir_table.setCurrentCell(0, 0)
+    QTest.keyClick(window.dir_table, Qt.Key_C, Qt.ControlModifier)
+
+    assert QApplication.clipboard().text() == ""
+
+
+def test_ctrl_c_on_lazy_directory_row_reads_value(window):
+    client = CountingClient(MainWindow.PREVIEW_LIMIT + 5)
+    window.client = client
+    window.refresh(silent=True)
+    QApplication.clipboard().clear()
+
+    last_row = window.dir_table.rowCount() - 1
+    window.dir_table.setCurrentCell(last_row, 0)
+    QTest.keyClick(window.dir_table, Qt.Key_C, Qt.ControlModifier)
+
+    assert QApplication.clipboard().text() == f"value-of-secret-{last_row}"
+
+
+def test_ctrl_shift_enter_accepts_secret_dialog(window):
+    dialog = SecretDialog(window, default_path="team/")
+    dialog.table.setItem(0, 0, QTableWidgetItem("password"))
+    dialog.table.setItem(0, 1, QTableWidgetItem("s3cret"))
+
+    QTest.keyClick(
+        dialog, Qt.Key_Return, Qt.ControlModifier | Qt.ShiftModifier
+    )
+
+    assert dialog.result() == QDialog.Accepted
+
+
+def test_escape_rejects_secret_dialog(window):
+    dialog = SecretDialog(window)
+
+    QTest.keyClick(dialog, Qt.Key_Escape)
+
+    assert dialog.result() == QDialog.Rejected
+
+
+def test_secret_dialog_copy_uses_window_clipboard_policy(window):
+    dialog = SecretDialog(window)
+    dialog.table.setItem(0, 0, QTableWidgetItem("password"))
+    dialog.table.setItem(0, 1, QTableWidgetItem("s3cret"))
+
+    dialog._copy_row_value(0)
+
+    assert QApplication.clipboard().text() == "s3cret"
+    # Копирование из диалога взводит общую автоочистку буфера
+    assert window._clipboard_timer.isActive()
+    dialog.close()
