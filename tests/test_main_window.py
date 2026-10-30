@@ -504,3 +504,65 @@ def test_show_secret_error_is_reported(window, caplog):
 
     assert window.status_label.text().startswith("❌")
     assert window.content_stack.currentWidget() is not window.secret_page
+
+
+def test_disconnect_clears_client_tree_and_cache(window):
+    window.client = FakeClient()
+    window.refresh(silent=True)
+    window.open_secret("root-secret")
+    window._secret_cache["root-secret"] = (time.monotonic(), {"k": "v"})
+    window.copy_to_clipboard("secret-value")
+
+    window.disconnect_from_vault()
+
+    assert window.client is None
+    assert window._secret_cache == {}
+    assert window.tree.topLevelItemCount() == 0
+    assert window.content_stack.currentWidget() is window.empty_page
+    assert window.status_label.text() == "Не подключено"
+    assert window.delete_target_label.text() == "Секрет не выбран"
+    assert QApplication.clipboard().text() == ""
+
+
+def test_disconnect_without_connection_warns(window):
+    assert window.client is None
+
+    window.disconnect_from_vault()
+
+    assert "нет активного подключения" in window.status_label.text().lower()
+
+
+def test_purge_expired_cache_removes_old_entries(window):
+    now = time.monotonic()
+    window._secret_cache["fresh"] = (now, {"k": "v"})
+    window._secret_cache["stale"] = (now - window.CACHE_TTL - 1, {"k": "v"})
+
+    window._purge_expired_cache()
+
+    assert "fresh" in window._secret_cache
+    assert "stale" not in window._secret_cache
+
+
+def test_connect_starts_and_disconnect_stops_cache_timer(window, monkeypatch):
+    class StubClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def list_secrets(self, path=""):
+            return []
+
+        def read_secret(self, path):
+            return {}
+
+    monkeypatch.setattr("ui.main_window.VaultClient", StubClient)
+
+    window._connect_to_vault(
+        "https://vault.local:8200", "token", "secret", save=False
+    )
+
+    assert window.client is not None
+    assert window._cache_timer.isActive()
+    assert "Подключено" in window.status_label.text()
+
+    window.disconnect_from_vault()
+    assert not window._cache_timer.isActive()

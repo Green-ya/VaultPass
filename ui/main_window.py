@@ -84,6 +84,12 @@ class MainWindow(QMainWindow):
         self._status_timer.setSingleShot(True)
         self._status_timer.timeout.connect(self._reset_status)
 
+        # Периодическая очистка кэша расшифрованных секретов: TTL ограничивает
+        # чтение, но не время жизни записи в памяти.
+        self._cache_timer = QTimer(self)
+        self._cache_timer.setInterval(self.CACHE_TTL * 1000)
+        self._cache_timer.timeout.connect(self._purge_expired_cache)
+
         self._create_menu()
         self._create_widgets()
         self._load_config()
@@ -96,6 +102,7 @@ class MainWindow(QMainWindow):
         self._clear_clipboard()
         self._clipboard_timer.stop()
         self._status_timer.stop()
+        self._cache_timer.stop()
         self._secret_cache.clear()
         super().closeEvent(event)
 
@@ -192,6 +199,19 @@ class MainWindow(QMainWindow):
         self._secret_cache[path] = (now, data)
         return data
 
+    def _purge_expired_cache(self):
+        """Выбрасывает из памяти расшифрованные секреты старше TTL."""
+        now = time.monotonic()
+        expired = [
+            path
+            for path, (stamp, _data) in self._secret_cache.items()
+            if now - stamp >= self.CACHE_TTL
+        ]
+        for path in expired:
+            self._secret_cache.pop(path, None)
+        if expired:
+            logger.debug("Очищено из кэша секретов: %d", len(expired))
+
     def _invalidate_cache(self, path=None):
         if path is None:
             self._secret_cache.clear()
@@ -213,6 +233,11 @@ class MainWindow(QMainWindow):
         connect_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
         connect_action.triggered.connect(self.show_config_dialog)
         file_menu.addAction(connect_action)
+
+        self.disconnect_action = QAction("Отключиться", self)
+        self.disconnect_action.setShortcut(QKeySequence("Ctrl+Shift+D"))
+        self.disconnect_action.triggered.connect(self.disconnect_from_vault)
+        file_menu.addAction(self.disconnect_action)
 
         file_menu.addSeparator()
         exit_action = QAction("Выход", self)
@@ -288,6 +313,10 @@ class MainWindow(QMainWindow):
         self.btn_search = QPushButton("🔍 Поиск")
         self.btn_search.clicked.connect(self.show_search_dialog)
         panel_layout.addWidget(self.btn_search)
+
+        self.btn_disconnect = QPushButton("🔌 Отключиться")
+        self.btn_disconnect.clicked.connect(self.disconnect_from_vault)
+        panel_layout.addWidget(self.btn_disconnect)
 
         panel_layout.addStretch()
 
@@ -533,6 +562,7 @@ class MainWindow(QMainWindow):
         self.client = client
         self._invalidate_cache()
         self._active_path = ""
+        self._cache_timer.start()
         logger.info("Подключение к Vault установлено: %s", url)
 
         if save:
@@ -551,6 +581,31 @@ class MainWindow(QMainWindow):
             self._connect_to_vault(url, token, mount)
         except Exception as e:
             self._report_error(str(e), e)
+
+    def disconnect_from_vault(self):
+        """Отключается от Vault и вычищает секреты из памяти."""
+        if not self.client:
+            self.warn("Нет активного подключения")
+            return
+
+        self._clear_clipboard()
+        self._invalidate_cache()
+        self.client = None
+        self._cache_timer.stop()
+        self._active_path = ""
+        self._directory_path = ""
+        self._secret_path = None
+        self._secret_data = {}
+
+        self.tree.clear()
+        self.content_stack.setCurrentWidget(self.empty_page)
+        self.delete_target_label.setText("Секрет не выбран")
+        self._update_delete_action()
+
+        logger.info("Отключение от Vault: клиент и кэш очищены")
+        self._status_timer.stop()
+        self.status_label.setText("Не подключено")
+        self.clipboard_label.setText("")
 
     # ------------------------------------------------------------------
     # Дерево
