@@ -3,6 +3,7 @@
 VaultPass - GUI менеджер паролей для HashiCorp Vault
 """
 
+import logging
 import os
 import sys
 
@@ -15,10 +16,14 @@ from logging_setup import setup_logging
 from resource_utils import get_resource_path
 from ui.main_window import MainWindow
 
+__version__ = "0.2.0"
+
 
 def main():
     setup_logging(debug=bool(os.environ.get("VAULTPASS_DEBUG")))
+    logging.getLogger("vaultpass").info("Запуск VaultPass %s", __version__)
     app = QApplication(sys.argv)
+    app.setApplicationVersion(__version__)
     app.setApplicationName("VaultPass")
     # Не задаём display name: некоторые оконные менеджеры добавляют его
     # к заголовку окна, из-за чего VaultPass появлялся дважды.

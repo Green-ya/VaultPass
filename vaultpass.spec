@@ -11,6 +11,7 @@ hiddenimports = [
     # Локальные модули: без pathex PyInstaller их не видит при сборке
     # через консольный скрипт (cwd не попадает в module search paths).
     'config_manager',
+    'logging_setup',
     'resource_utils',
     'vault_client',
     'ui',

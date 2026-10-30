@@ -16,7 +16,7 @@ from PyInstaller.archive.readers import CArchiveReader
 
 archive = CArchiveReader("dist/vaultpass")
 pyz = archive.open_embedded_archive("PYZ.pyz")
-required = {"config_manager", "resource_utils", "vault_client", "ui.main_window"}
+required = {"config_manager", "logging_setup", "resource_utils", "vault_client", "ui.main_window"}
 missing = required - set(pyz.toc)
 if missing:
     sys.exit(f"В сборке отсутствуют модули: {sorted(missing)}")
