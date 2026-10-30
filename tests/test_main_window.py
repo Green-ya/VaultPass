@@ -1,3 +1,4 @@
+import logging
 import time
 
 import pytest
@@ -461,3 +462,45 @@ def test_large_directory_loads_values_lazily(window):
 
     assert len(client.reads) == 1
     assert client.reads[-1] == f"secret-{last_row}"
+
+
+def test_report_error_logs_details_and_shows_message(window, caplog):
+    with caplog.at_level(logging.ERROR, logger="ui.main_window"):
+        window._report_error(
+            "Не удалось загрузить секрет: boom", RuntimeError("boom")
+        )
+
+    assert window.status_label.text().startswith("❌")
+    assert "boom" in window.status_label.text()
+
+    records = [r for r in caplog.records if r.name == "ui.main_window"]
+    assert records
+    assert records[-1].exc_info is not None
+
+
+def test_load_directory_error_is_reported_and_logged(window, caplog):
+    class BoomClient(FakeClient):
+        def list_secrets(self, path=""):
+            raise RuntimeError("сеть недоступна")
+
+    window.client = BoomClient()
+
+    with caplog.at_level(logging.ERROR, logger="ui.main_window"):
+        window.load_directory("")
+
+    assert window.status_label.text().startswith("❌")
+    assert any("сеть недоступна" in r.getMessage() for r in caplog.records)
+
+
+def test_show_secret_error_is_reported(window, caplog):
+    class BoomClient(FakeClient):
+        def read_secret(self, path):
+            raise RuntimeError("секрет недоступен")
+
+    window.client = BoomClient()
+
+    with caplog.at_level(logging.ERROR, logger="ui.main_window"):
+        window.show_secret("root-secret")
+
+    assert window.status_label.text().startswith("❌")
+    assert window.content_stack.currentWidget() is not window.secret_page

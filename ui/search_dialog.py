@@ -1,3 +1,5 @@
+import logging
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -17,6 +19,8 @@ from PySide6.QtWidgets import (
 )
 
 from vault_client import VaultClientError
+
+logger = logging.getLogger(__name__)
 
 
 class SearchDialog(QDialog):
@@ -126,8 +130,10 @@ class SearchDialog(QDialog):
                     self._match_values(path, query)
         except VaultClientError as e:
             error_text = str(e)
+            logger.error("Поиск прерван ошибкой Vault: %s", e)
         except Exception as e:  # сетевые ошибки и неожиданные ответы Vault
             error_text = f"Поиск прерван: {e}"
+            logger.exception("Неожиданная ошибка во время поиска")
         finally:
             QApplication.restoreOverrideCursor()
             progress.close()

@@ -11,11 +11,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from logging_setup import setup_logging
 from resource_utils import get_resource_path
 from ui.main_window import MainWindow
 
 
 def main():
+    setup_logging(debug=bool(os.environ.get("VAULTPASS_DEBUG")))
     app = QApplication(sys.argv)
     app.setApplicationName("VaultPass")
     # Не задаём display name: некоторые оконные менеджеры добавляют его

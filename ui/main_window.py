@@ -1,4 +1,5 @@
 import html
+import logging
 import math
 import os
 import time
@@ -36,10 +37,13 @@ from PySide6.QtWidgets import (
 )
 
 from config_manager import ConfigManager
+from logging_setup import set_debug
 from resource_utils import get_resource_path
 from ui.dialogs import ConfigDialog, DeleteSecretDialog, SecretDialog
 from ui.search_dialog import SearchDialog
 from vault_client import VaultClient
+
+logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
@@ -120,14 +124,25 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Готово")
 
     # ------------------------------------------------------------------
+    # Обработка ошибок: в лог — детали, пользователю — понятный текст
+    # ------------------------------------------------------------------
+    def _report_error(self, message, exc=None, level=logging.ERROR):
+        """Логирует технические детали и показывает пользователю понятный текст.
+
+        ``exc`` передаётся в лог как traceback; секреты сюда не попадают.
+        """
+        logger.log(level, "%s", message, exc_info=exc)
+        self.error(f"❌ {message}")
+
+    # ------------------------------------------------------------------
     # Вспомогательные методы
     # ------------------------------------------------------------------
     def debug_log(self, *args):
-        if self.debug_mode:
-            print("[DEBUG]", *args)
+        logger.debug(" ".join(str(a) for a in args))
 
     def toggle_debug_mode(self, checked):
         self.debug_mode = checked
+        set_debug(checked)
         if checked:
             self.info("🐛 Режим отладки включён")
         else:
@@ -511,13 +526,14 @@ class MainWindow(QMainWindow):
                 save=False,
             )
         except Exception as e:
-            self.error(f"Ошибка: {e}")
+            self._report_error(f"Ошибка: {e}", e)
 
     def _connect_to_vault(self, url, token, mount_point, save=True):
         client = VaultClient(url, token, mount_point)
         self.client = client
         self._invalidate_cache()
         self._active_path = ""
+        logger.info("Подключение к Vault установлено: %s", url)
 
         if save:
             self.config_manager.save_config(url, token, mount_point)
@@ -534,7 +550,7 @@ class MainWindow(QMainWindow):
         try:
             self._connect_to_vault(url, token, mount)
         except Exception as e:
-            self.error(str(e))
+            self._report_error(str(e), e)
 
     # ------------------------------------------------------------------
     # Дерево
@@ -639,7 +655,7 @@ class MainWindow(QMainWindow):
             items = self.client.list_secrets(path)
         except Exception as e:
             if show_errors:
-                self.error(f"Не удалось загрузить {path or '/'}: {e}")
+                self._report_error(f"Не удалось загрузить {path or '/'}: {e}", e)
             return
 
         for item in items:
@@ -722,7 +738,7 @@ class MainWindow(QMainWindow):
         try:
             data = self._get_secret(path)
         except Exception as e:
-            self.error(f"Не удалось загрузить секрет: {e}")
+            self._report_error(f"Не удалось загрузить секрет: {e}", e)
             return
 
         self._active_path = path
@@ -742,7 +758,7 @@ class MainWindow(QMainWindow):
         try:
             items = self.client.list_secrets(path)
         except Exception as e:
-            self.error(f"Не удалось загрузить {path or '/'}: {e}")
+            self._report_error(f"Не удалось загрузить {path or '/'}: {e}", e)
             return
 
         prefix = (path or "").rstrip("/")
@@ -1039,7 +1055,7 @@ class MainWindow(QMainWindow):
         try:
             data = self._get_secret(path)
         except Exception as e:
-            self.error(str(e))
+            self._report_error(str(e), e)
             return
         value = next(iter(data.values()), "")
         if value:
@@ -1144,7 +1160,7 @@ class MainWindow(QMainWindow):
                 f"✅ {'Обновлён' if existing else 'Создан'} секрет: {path}"
             )
         except Exception as e:
-            self.error(str(e))
+            self._report_error(str(e), e)
 
     def edit_secret(self, path):
         if not self.client or not path:
@@ -1153,7 +1169,7 @@ class MainWindow(QMainWindow):
         try:
             data = self._get_secret(path, force=True)
         except Exception as e:
-            self.error(str(e))
+            self._report_error(str(e), e)
             return
 
         dialog = SecretDialog(self, existing_path=path, existing_data=data)
@@ -1172,7 +1188,7 @@ class MainWindow(QMainWindow):
             self.refresh(silent=True)
             self.info(f"✅ Секрет обновлён: {new_path}")
         except Exception as e:
-            self.error(str(e))
+            self._report_error(str(e), e)
 
     def _selected_secret_for_deletion(self):
         """Возвращает путь секрета, который сейчас выбран для удаления."""
@@ -1252,7 +1268,7 @@ class MainWindow(QMainWindow):
             self.refresh(silent=True)
             self.info(f"🗑️ Удалён: {path}")
         except Exception as e:
-            self.error(str(e))
+            self._report_error(str(e), e)
 
     # ------------------------------------------------------------------
     # Поиск

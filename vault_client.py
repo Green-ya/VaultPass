@@ -1,5 +1,9 @@
+import logging
+
 import hvac
 from hvac.exceptions import InvalidPath, VaultError
+
+logger = logging.getLogger(__name__)
 
 
 class VaultClientError(Exception):
@@ -8,6 +12,10 @@ class VaultClientError(Exception):
 
 class VaultAuthError(VaultClientError):
     """Не удалось авторизоваться в Vault."""
+
+
+class VaultConnectionError(VaultClientError):
+    """Не удалось установить соединение с Vault."""
 
 
 class VaultClient:
@@ -27,12 +35,23 @@ class VaultClient:
         try:
             authenticated = self.client.is_authenticated()
         except VaultError as e:
-            raise VaultAuthError(f"Не удалось подключиться к Vault: {e}") from e
+            # Vault ответил, но отклонил нас (например, неверный токен).
+            logger.error("Vault отклонил подключение к %s: %s", self.url, e)
+            raise VaultAuthError(
+                f"Vault отклонил подключение: {e}"
+            ) from e
         except Exception as e:
-            raise VaultAuthError(f"Не удалось подключиться к Vault: {e}") from e
+            # Сетевые ошибки (requests) и прочие сбои на стороне клиента.
+            logger.error("Не удалось подключиться к %s: %s", self.url, e)
+            raise VaultConnectionError(
+                f"Не удалось подключиться к Vault ({self.url}): {e}"
+            ) from e
 
         if not authenticated:
-            raise VaultAuthError("Не удалось авторизоваться в Vault: проверьте токен")
+            logger.warning("Токен отклонён Vault (%s)", self.url)
+            raise VaultAuthError(
+                "Не удалось авторизоваться в Vault: проверьте токен"
+            )
 
     @staticmethod
     def _normalize(path: str) -> str:
@@ -52,6 +71,7 @@ class VaultClient:
         except InvalidPath:
             return []
         except VaultError as e:
+            logger.error("Не удалось получить список %s: %s", path or "/", e)
             raise VaultClientError(f"Ошибка Vault: {e}") from e
 
     def iter_all_secrets(self, root=""):
@@ -79,6 +99,7 @@ class VaultClient:
         except InvalidPath:
             return {}
         except VaultError as e:
+            logger.error("Не удалось прочитать секрет %s: %s", path, e)
             raise VaultClientError(f"Ошибка Vault: {e}") from e
 
     def create_secret(self, path, data):
@@ -94,6 +115,7 @@ class VaultClient:
             )
             return True
         except VaultError as e:
+            logger.error("Не удалось сохранить секрет %s: %s", path, e)
             raise VaultClientError(f"Ошибка создания секрета: {e}") from e
 
     def delete_secret(self, path):
@@ -106,4 +128,5 @@ class VaultClient:
             )
             return True
         except VaultError as e:
+            logger.error("Не удалось удалить секрет %s: %s", path, e)
             raise VaultClientError(f"Ошибка удаления: {e}") from e

@@ -4,7 +4,13 @@ setup(
     name="vaultpass",
     version="0.1.0",
     description="GUI-менеджер паролей для HashiCorp Vault",
-    py_modules=["main", "vault_client", "config_manager", "resource_utils"],
+    py_modules=[
+        "main",
+        "vault_client",
+        "config_manager",
+        "resource_utils",
+        "logging_setup",
+    ],
     packages=find_packages(include=["ui", "ui.*"]),
     include_package_data=True,
     data_files=[
