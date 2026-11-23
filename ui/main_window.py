@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 from config_manager import ConfigManager
 from logging_setup import set_debug
 from resource_utils import get_resource_path
-from ui.dialogs import ConfigDialog, DeleteSecretDialog, SecretDialog
+from ui.dialogs import ConfigDialog, DeleteSecretDialog, MountDialog, SecretDialog
 from ui.search_dialog import SearchDialog
 from ui.widgets import CopyableTable
 from vault_client import VaultClient
@@ -269,6 +269,12 @@ class MainWindow(QMainWindow):
         self.disconnect_action.triggered.connect(self.disconnect_from_vault)
         file_menu.addAction(self.disconnect_action)
 
+        self.switch_engine_action = QAction("Сменить Secrets engine…", self)
+        self.switch_engine_action.setShortcut(QKeySequence("Ctrl+Shift+E"))
+        self.switch_engine_action.triggered.connect(self.switch_engine)
+        self.switch_engine_action.setEnabled(False)
+        file_menu.addAction(self.switch_engine_action)
+
         file_menu.addSeparator()
         exit_action = QAction("Выход", self)
         exit_action.setShortcut(QKeySequence("Ctrl+Q"))
@@ -353,6 +359,12 @@ class MainWindow(QMainWindow):
         self.btn_disconnect = QPushButton("🔌 Отключиться")
         self.btn_disconnect.clicked.connect(self.disconnect_from_vault)
         panel_layout.addWidget(self.btn_disconnect)
+
+        self.btn_engine = QPushButton("🗄 Engine: —")
+        self.btn_engine.setToolTip("Сменить Secrets engine (KV v2)")
+        self.btn_engine.clicked.connect(self.switch_engine)
+        self.btn_engine.setEnabled(False)
+        panel_layout.addWidget(self.btn_engine)
 
         panel_layout.addStretch()
 
@@ -621,6 +633,7 @@ class MainWindow(QMainWindow):
         if save:
             self.config_manager.save_config(url, token, mount_point)
 
+        self._update_engine_button()
         self.info(f"✅ Подключено к {url}")
         self.refresh(silent=True)
 
@@ -658,9 +671,83 @@ class MainWindow(QMainWindow):
         self._update_delete_action()
 
         logger.info("Отключение от Vault: клиент и кэш очищены")
+        self._update_engine_button()
         self._status_timer.stop()
         self.status_label.setText("Не подключено")
         self.clipboard_label.setText("")
+
+    # ------------------------------------------------------------------
+    # Переключатель Secrets engines
+    # ------------------------------------------------------------------
+    def _update_engine_button(self):
+        """Синхронизирует кнопку и пункт меню с текущим подключением."""
+        if self.client:
+            self.btn_engine.setText(f"🗄 Engine: {self.client.mount_point}")
+            self.btn_engine.setEnabled(True)
+            self.switch_engine_action.setEnabled(True)
+            return
+
+        self.btn_engine.setText("🗄 Engine: —")
+        self.btn_engine.setEnabled(False)
+        self.switch_engine_action.setEnabled(False)
+
+    def switch_engine(self):
+        """Показывает диалог выбора engine и переключает mount point."""
+        if not self.client:
+            self.warn("Сначала подключитесь к Vault")
+            return
+
+        mounts = []
+        list_error = None
+        try:
+            mounts = self.client.list_kv_mounts()
+        except Exception as e:  # права/сеть — предлагаем ручной ввод
+            logger.warning("Список Secrets engines не получен: %s", e)
+            list_error = e
+
+        dialog = MountDialog(
+            current=self.client.mount_point,
+            mounts=mounts,
+            list_error=list_error,
+            parent=self,
+        )
+        if not dialog.exec():
+            return
+
+        new_mount = dialog.get_mount()
+        if not new_mount:
+            return
+        if new_mount == self.client.mount_point:
+            self.info(f"🗄️ Уже используется engine '{new_mount}'")
+            return
+        self._apply_engine(new_mount)
+
+    def _apply_engine(self, mount):
+        """Переключает клиента на другой engine и сбрасывает состояние окна.
+
+        Кэш, активный путь, правую панель, дерево и буфер обмена очищаются
+        до смены mount point: данные предыдущего engine не должны
+        протекать в новый.
+        """
+        self._clear_clipboard()
+        self._invalidate_cache()
+        self.client.set_mount_point(mount)
+        self._active_path = ""
+        self._directory_path = ""
+        self._secret_path = None
+        self._secret_data = {}
+
+        self.tree.clear()
+        self.content_stack.setCurrentWidget(self.empty_page)
+        self.delete_target_label.setText("Секрет не выбран")
+        self._update_delete_action()
+        self._update_engine_button()
+
+        # Не-silent: ошибки нового mount (нет прав, пустой список) должны
+        # попасть в слой уведомлений, а не пропасть молча.
+        self.refresh()
+        if not self._last_error:
+            self.info(f"🗄️ Engine переключен на '{mount}'")
 
     # ------------------------------------------------------------------
     # Дерево

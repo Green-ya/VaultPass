@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -53,7 +54,7 @@ def generate_password(
 
     # Гарантируем хотя бы один символ из каждого выбранного набора
     password = [secrets.choice(pool) for pool in pools]
-    password.extend(secrets.choice(alphabet) for _ in range(length - len(password)))
+    password.extend(secrets.choice(alphabet) for _ in range(length - len(pools)))
     secrets.SystemRandom().shuffle(password)
     return "".join(password)
 
@@ -383,6 +384,72 @@ class SecretDialog(ConfirmOnCtrlShiftEnter, QDialog):
                     data[key] = value
 
         return path, data
+
+
+class MountDialog(ConfirmOnCtrlShiftEnter, QDialog):
+    """Диалог выбора Secrets engine (mount point KV v2).
+
+    Список engines приходит из ``sys/mounts``. Если Vault не отдал список
+    (например, нет прав), поле остаётся пустым с подсказкой — mount point
+    можно ввести вручную: комбобокс редактируемый.
+    """
+
+    def __init__(self, current="", mounts=None, list_error=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Сменить Secrets engine")
+        self.setModal(True)
+        self.resize(480, 240)
+
+        layout = QVBoxLayout(self)
+
+        hint = QLabel(
+            "Только движки KV v2. Изменение применяется без переподключения."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #666;")
+        layout.addWidget(hint)
+
+        form = QFormLayout()
+        self.mount_combo = QComboBox()
+        self.mount_combo.setEditable(True)
+        for mount in sorted(mounts or []):
+            self.mount_combo.addItem(mount)
+        self.mount_combo.setCurrentText(current)
+        self.mount_combo.setToolTip("Доступные KV v2 engines; можно ввести вручную")
+        form.addRow("Mount point:", self.mount_combo)
+        layout.addLayout(form)
+
+        self.list_error_label = QLabel("")
+        if list_error is not None:
+            self.list_error_label.setText(
+                "⚠️ Не удалось получить список engines "
+                f"({list_error}). Укажите mount point вручную."
+            )
+            self.list_error_label.setStyleSheet("color: #c62828;")
+            self.list_error_label.setWordWrap(True)
+        layout.addWidget(self.list_error_label)
+
+        # Строка встроенной валидации (вместо модальных окон).
+        self.error_label = QLabel("")
+        self.error_label.setStyleSheet("color: #c62828;")
+        self.error_label.setWordWrap(True)
+        layout.addWidget(self.error_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_mount(self):
+        """Возвращает нормализованный mount point из поля ввода."""
+        return self.mount_combo.currentText().strip().strip("/")
+
+    def accept(self):
+        self.error_label.setText("")
+        if not self.get_mount():
+            self.error_label.setText("⚠️ Укажите mount point")
+            return
+        super().accept()
 
 
 class DeleteSecretDialog(QDialog):
