@@ -25,6 +25,8 @@ jobs:
         run: pylint $(git ls-files '*.py')
 
   tests:
+    permissions:
+      issues: write
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
@@ -66,9 +68,6 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: `CI: failing tests on ${context.job}`,
-              body: `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}
-
-` +
-                fails.map(f => `- ${f}`).join('
-'),
+              body: `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}` +
+                "\n\n" + fails.map(f => `- ${f}`).join("\n"),
             });
