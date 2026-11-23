@@ -43,4 +43,12 @@ jobs:
       - name: Run tests
         env:
           QT_QPA_PLATFORM: offscreen
-        run: pytest -q
+        run: pytest -q --junitxml=junit.xml
+      - name: Upload test report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report-${{ matrix.os }}-${{ matrix.python-version }}
+          path: junit.xml
+          retention-days: 14
+          if-no-files-found: ignore
