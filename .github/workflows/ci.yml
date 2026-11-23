@@ -52,3 +52,23 @@ jobs:
           path: junit.xml
           retention-days: 14
           if-no-files-found: ignore
+      - name: Report failing tests in issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const xml = fs.readFileSync('junit.xml', 'utf8');
+            const fails = [...xml.matchAll(
+              /<testcase[^>]*name="([^"]*)"[^>]*>\s*<(failure|error)/g
+            )].map(m => m[1]);
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `CI: failing tests on ${context.job}`,
+              body: `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}
+
+` +
+                fails.map(f => `- ${f}`).join('
+'),
+            });
