@@ -15,6 +15,9 @@ class FakeClient:
         }
         self.deleted = []
         self.created = []
+        self.mount_point = "secret"
+        self.mounts = ["secret"]
+        self.fail_listing = False
 
     def list_secrets(self, path=""):
         return self.tree.get(path, [])
@@ -33,6 +36,14 @@ class FakeClient:
 
     def read_secret(self, path):
         return {"password": f"value-of-{path}", "user": "alice"}
+
+    def set_mount_point(self, mount_point):
+        self.mount_point = mount_point
+
+    def list_kv_mounts(self):
+        if self.fail_listing:
+            raise RuntimeError("нет прав на sys/mounts")
+        return list(self.mounts)
 
     def create_secret(self, path, data):
         self.created.append((path, data))

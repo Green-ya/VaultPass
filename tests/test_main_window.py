@@ -14,7 +14,7 @@ from fakes import CountingClient, FakeClient, FakeKeyring
 
 import config_manager as config_module
 from config_manager import ConfigManager
-from ui.dialogs import ConfigDialog, DeleteSecretDialog, SecretDialog
+from ui.dialogs import ConfigDialog, DeleteSecretDialog, MountDialog, SecretDialog
 from ui.main_window import MainWindow
 from ui.search_dialog import SearchDialog
 from vault_client import VaultClientError
@@ -1258,3 +1258,125 @@ def test_enter_on_secret_opens_it(window):
 
     assert window._secret_path == "root-secret"
     assert window.content_stack.currentWidget() is window.secret_page
+
+
+# ------------------------------------------------------------------
+# Переключатель Secrets engines (спринт 2)
+# ------------------------------------------------------------------
+
+
+class _EngineAwareClient(FakeClient):
+    """FakeClient, чьё содержимое зависит от mount point."""
+
+    def list_secrets(self, path=""):
+        if self.mount_point == "secret":
+            return {"": ["folder/", "root-secret"]}.get(path, [])
+        return {"": ["other-secret"]}.get(path, [])
+
+
+def _tree_all_names(window):
+    """Все имена элементов дерева (рекурсивно, без корневого элемента)."""
+    names = []
+
+    def _walk(item):
+        for i in range(item.childCount()):
+            child = item.child(i)
+            names.append(child.text(0))
+            _walk(child)
+
+    for i in range(window.tree.topLevelItemCount()):
+        _walk(window.tree.topLevelItem(i))
+    return names
+
+
+def test_apply_engine_resets_state_and_shows_new_mount(window):
+    window.client = _EngineAwareClient()
+    window.refresh()
+    assert any("root-secret" in n for n in _tree_all_names(window))
+
+    window.copy_to_clipboard("top-secret-value")
+    window._secret_cache["root-secret"] = (time.monotonic(), {"k": "v"})
+    window._active_path = "root-secret"
+
+    window._apply_engine("kv2")
+
+    assert window.client.mount_point == "kv2"
+    # Кэш после refresh содержит только данные нового mount: старого нет
+    assert "root-secret" not in window._secret_cache
+    assert "other-secret" in window._secret_cache
+    assert window._active_path == ""
+    assert QApplication.clipboard().text() == ""
+    # Дерево перестроено из нового mount: секреты старого не протекают
+    names = _tree_all_names(window)
+    assert any("other-secret" in n for n in names)
+    assert not any("root-secret" in n for n in names)
+    assert "kv2" in window.status_label.text()
+
+
+def test_apply_engine_error_goes_to_notification_layer(window):
+    class _FailingClient(FakeClient):
+        def list_secrets(self, path=""):
+            raise VaultClientError("нет прав на чтение")
+
+    window.client = _FailingClient()
+    window._apply_engine("kv2")
+
+    assert window._last_error
+    assert "❌" in window.status_label.text()
+
+
+def test_switch_engine_same_mount_shows_info(window, monkeypatch):
+    class _Dialog:
+        def __init__(self, **kwargs):
+            pass
+
+        def exec(self):
+            return True
+
+        def get_mount(self):
+            return "secret"
+
+    monkeypatch.setattr("ui.main_window.MountDialog", _Dialog)
+    window.client = FakeClient()
+
+    window.switch_engine()
+
+    assert "Уже используется" in window.status_label.text()
+
+
+def test_switch_engine_manual_input_when_listing_fails(window, monkeypatch):
+    captured = {}
+
+    class _Dialog:
+        def __init__(self, current="", mounts=None, list_error=None, parent=None):
+            captured.update(
+                current=current, mounts=mounts, list_error=list_error
+            )
+
+        def exec(self):
+            return True
+
+        def get_mount(self):
+            return "manual"
+
+    monkeypatch.setattr("ui.main_window.MountDialog", _Dialog)
+    window.client = FakeClient()
+    window.client.fail_listing = True
+
+    window.switch_engine()
+
+    assert captured["mounts"] == []
+    assert captured["list_error"] is not None
+    assert window.client.mount_point == "manual"
+    assert "manual" in window.status_label.text()
+
+
+def test_mount_dialog_manual_mount_normalized():
+    dialog = MountDialog(
+        current="secret", mounts=[], list_error=RuntimeError("403")
+    )
+    dialog.mount_combo.setCurrentText("/custom/mount/")
+
+    assert dialog.get_mount() == "custom/mount"
+    dialog.accept()
+    dialog.deleteLater()
