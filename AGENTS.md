@@ -4,6 +4,11 @@ VaultPass — настольный GUI-менеджер паролей для Ha
 Python 3.11–3.12 + PySide6 + hvac. Дистрибуция: AppImage (`build_appimage.sh`),
 nix-пакет (`vaultpass.nix`, `flake.nix`). Никаких внешних сервисов — только Vault.
 
+> Kimi Work workspace: публичный клон — `./VaultPass` (master @ `c9fd222`,
+> v0.2.0); рабочая копия разработки — `./VaultPass-dev` (develop @ `08f0682`,
+> remote `origin` → `Green-ya/VaultPass-dev`). Тон: кратко, по делу,
+> структура списками, на русском.
+
 ## Workflow
 
 - Спринты строго по порядку; **стоп после каждого спринта**, отчёт, ждём
@@ -44,7 +49,7 @@ nix-пакет (`vaultpass.nix`, `flake.nix`). Никаких внешних с�
   типизированные ошибки `VaultClientError` / `VaultAuthError` /
   `VaultConnectionError`; нормализация путей `_normalize`; `list_secrets`,
   `iter_all_secrets`, `read_secret`, `create_secret`, `delete_secret`.
-  Mount point задаётся при подключении; смена без переподключения — см. спринт 2.
+  Mount point задаётся при подключении; смена без переподключения — спринт 2.
 - `config_manager.py` — конфиг, Fernet-шифрование токена, миграция из
   `~/.config/vault-manager`.
 - `logging_setup.py` — лог в консоль + файл `~/.config/vaultpass/vaultpass.log`.
@@ -75,22 +80,41 @@ nix-пакет (`vaultpass.nix`, `flake.nix`). Никаких внешних с�
    логирование, управление сессией (отключение, очистка кэша/буфера,
    `closeEvent`), UX и горячие клавиши, 114 тестов, CI pylint+pytest,
    README/ROADMAP в синхроне.
-2. **Переключатель Secrets engines** — TODO: смена mount point KV v2 без
-   отключения/подключения. Сейчас mount задаётся только в `ConfigDialog` при
-   подключении, и изменить его можно лишь через disconnect → connect.
-   - UI-переключатель в главном окне: список доступных engines
-     (`sys/mounts`, только KV v2) + ручной ввод как фолбэк при отсутствии
-     прав на листинг.
-   - При смене: обновить `client.mount_point`, полностью сбросить
-     `_secret_cache` и `_active_path`, перестроить дерево; секреты старого
-     engine не должны протекать в новый.
-   - Ошибки (нет прав на mount, engine не KV v2, пустой список) — через слой
-     уведомлений, без модальных окон.
-   - Тесты: переключение, инвалидация кэша/дерева, ошибочные ветки, ручной
-     ввод mount.
-   - Приёмка: подключиться → переключить engine → дерево и секреты нового
-     mount отображаются без переподключения; кэш и буфер не содержат данных
-     предыдущего engine.
+2. **Переключатель Secrets engines** — DONE (24.11.2026, develop @ `8afbc07`,
+   приёмка владельцем на тестовом стенде пройдена): `set_mount_point`,
+   `list_kv_mounts`, кнопка «Engine», `MountDialog`, сброс кэша/дерева/буфера.
+   Ручная приёмка: подключение к стенду, переключение, работа с секретами —
+   без замечаний, кроме бага переноса строки (см. спринт 3).
+   ТЗ (для истории): смена mount point KV v2 без отключения/подключения.
+3. **Windows-порт + стабилизация UI** — TODO.
+   Windows-порт:
+   - Пути конфигов: `%APPDATA%\VaultPass` вместо `~/.config/vaultpass`
+     (`config_manager.py`, `logging_setup.py`); миграция со старого пути.
+   - `os.chmod(0o600/0o700)` — условное выполнение (POSIX-only); chmod-тесты
+     пометить `skipif(sys.platform == "win32")` (4 теста падают на Windows
+     именно на этих assert).
+   - Сборка PyInstaller под Windows (`vaultpass.spec`) → `vaultpass.exe`;
+     keyring на Windows использует Credential Manager — проверить вживую.
+   - CI: добавить `windows-latest` в матрицу pytest.
+   - AppImage и nix — Linux-only, без изменений.
+   Стабилизация UI:
+   - **Баг (найден при приёмке спринта 2):** текст ошибки подключения
+     выводится одной строкой без переноса и растягивает окно на всю ширину.
+     Нужен перенос/обрезка (`wordWrap`, фиксированная ширина, tooltip с полным
+     текстом) — размер окна не должен меняться.
+   - Дописать тесты переключателя engines (наследие спринта 2: переключение,
+     инвалидация кэша/дерева, ошибочные ветки, ручной ввод mount).
+   - Приёмка: `pytest -q` зелёный на Windows, exe собирается и запускается,
+     подключение к тестовому Vault (`http://192.168.100.40:8200`) работает,
+     длинные ошибки не растягивают окно.
+
+## Test environment
+
+- Vault тестовый: `http://192.168.100.40:8200` (docker03, контейнер
+  `vault-test`, file storage, KV v2 на `secret/`). Ключи (root token +
+  unseal 1/1) — в `../vault-test-credentials.json` (воркспейс, вне репо).
+  После перезапуска контейнера Vault запечатан — нужен `vault operator unseal`.
+- Тестовые секреты: `secret/test/myapp`, `secret/test/ssh`.
 
 ## Current state / smoke
 
