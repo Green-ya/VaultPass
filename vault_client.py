@@ -130,3 +130,37 @@ class VaultClient:
         except VaultError as e:
             logger.error("Не удалось удалить секрет %s: %s", path, e)
             raise VaultClientError(f"Ошибка удаления: {e}") from e
+
+    # ------------------------------------------------------------------
+    # Secrets engines (mount points)
+    # ------------------------------------------------------------------
+    def set_mount_point(self, mount_point):
+        """Переключает клиента на другой mount point без переподключения."""
+        mount_point = (mount_point or "").strip().strip("/")
+        if not mount_point:
+            raise VaultClientError("Mount point не может быть пустым")
+        self.mount_point = mount_point
+
+    def list_kv_mounts(self):
+        """Возвращает отсортированный список mount point движков KV v2.
+
+        Данные берутся из ``sys/mounts``; оставляем только ``type=kv`` с
+        ``options.version=2``. Ошибки прав доступа и сети поднимаются как
+        ``VaultClientError`` — вызывающий код решает, предлагать ли ручной
+        ввод mount point.
+        """
+        try:
+            result = self.client.sys.list_mounted_secrets_engines()
+        except VaultError as e:
+            logger.error("Не удалось получить список Secrets engines: %s", e)
+            raise VaultClientError(f"Ошибка Vault: {e}") from e
+
+        mounts = []
+        for name, meta in (result or {}).get("data", {}).items():
+            if meta.get("type") != "kv":
+                continue
+            options = meta.get("options") or {}
+            if str(options.get("version")) != "2":
+                continue
+            mounts.append(name.rstrip("/"))
+        return sorted(mounts)
