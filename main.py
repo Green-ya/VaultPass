@@ -16,7 +16,7 @@ from logging_setup import setup_logging
 from resource_utils import get_resource_path
 from ui.main_window import MainWindow
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def main():
