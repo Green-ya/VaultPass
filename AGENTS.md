@@ -4,11 +4,6 @@ VaultPass — настольный GUI-менеджер паролей для Ha
 Python 3.11–3.12 + PySide6 + hvac. Дистрибуция: AppImage (`build_appimage.sh`),
 nix-пакет (`vaultpass.nix`, `flake.nix`). Никаких внешних сервисов — только Vault.
 
-> Kimi Work workspace: публичный клон — `./VaultPass` (master @ `c9fd222`,
-> v0.2.0); рабочая копия разработки — `./VaultPass-dev` (develop @ `08f0682`,
-> remote `origin` → `Green-ya/VaultPass-dev`). Тон: кратко, по делу,
-> структура списками, на русском.
-
 ## Workflow
 
 - Спринты строго по порядку; **стоп после каждого спринта**, отчёт, ждём
@@ -86,7 +81,11 @@ nix-пакет (`vaultpass.nix`, `flake.nix`). Никаких внешних с�
    Ручная приёмка: подключение к стенду, переключение, работа с секретами —
    без замечаний, кроме бага переноса строки (см. спринт 3).
    ТЗ (для истории): смена mount point KV v2 без отключения/подключения.
-3. **Windows-порт + стабилизация UI** — TODO.
+3. **Windows-порт + стабилизация UI** — DONE (24.11.2026, develop @
+   `334ab5f`, ручная приёмка владельца: exe работает, функционал на месте):
+   перенос длинных ошибок, APPDATA-пути, chmod POSIX-only, тесты переключателя
+   engines (9 шт.), CI windows-latest, сборка vaultpass.exe (PyInstaller).
+   Релиз v0.3.0.
    Windows-порт:
    - Пути конфигов: `%APPDATA%\VaultPass` вместо `~/.config/vaultpass`
      (`config_manager.py`, `logging_setup.py`); миграция со старого пути.
@@ -107,14 +106,6 @@ nix-пакет (`vaultpass.nix`, `flake.nix`). Никаких внешних с�
    - Приёмка: `pytest -q` зелёный на Windows, exe собирается и запускается,
      подключение к тестовому Vault (`http://192.168.100.40:8200`) работает,
      длинные ошибки не растягивают окно.
-
-## Test environment
-
-- Vault тестовый: `http://192.168.100.40:8200` (docker03, контейнер
-  `vault-test`, file storage, KV v2 на `secret/`). Ключи (root token +
-  unseal 1/1) — в `../vault-test-credentials.json` (воркспейс, вне репо).
-  После перезапуска контейнера Vault запечатан — нужен `vault operator unseal`.
-- Тестовые секреты: `secret/test/myapp`, `secret/test/ssh`.
 
 ## Current state / smoke
 
