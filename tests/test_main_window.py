@@ -189,6 +189,23 @@ def test_notify_levels_write_to_status_label(window):
     assert not window._status_timer.isActive()
 
 
+def test_long_error_does_not_expand_window(window):
+    """Регрессия: длинный текст ошибки переносится и не растягивает окно
+    (баг приёмки спринта 2 — окно разъезжалось на оба монитора)."""
+    long_text = "❌ " + "очень-длинное-описание-ошибки " * 30
+    window.error(long_text)
+
+    assert window.status_label.wordWrap()
+    assert window.status_label.toolTip() == long_text
+
+    window.show()
+    app_width = window.width()
+    hint = window.status_label.sizeHint()
+    assert hint.width() <= app_width
+    window._reset_status()
+    assert window.status_label.toolTip() == ""
+
+
 def test_info_autohides_via_timer(window):
     window.info("ℹ️ привет", timeout=1000)
     assert window._status_timer.isActive()

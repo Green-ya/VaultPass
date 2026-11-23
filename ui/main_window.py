@@ -120,6 +120,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _notify(self, text, timeout=INFO_TIMEOUT_MS):
         self.status_label.setText(text)
+        self.status_label.setToolTip(text)
         self._status_timer.stop()
         if timeout and timeout > 0:
             self._status_timer.start(timeout)
@@ -141,6 +142,7 @@ class MainWindow(QMainWindow):
 
     def _reset_status(self):
         self.status_label.setText("Готово")
+        self.status_label.setToolTip("")
 
     # ------------------------------------------------------------------
     # Обработка ошибок: в лог — детали, пользователю — понятный текст
@@ -375,7 +377,10 @@ class MainWindow(QMainWindow):
         self.clipboard_label.setStyleSheet("color: #666;")
         panel_layout.addWidget(self.clipboard_label)
 
+        # Длинный текст ошибки переносится по словам и не растягивает
+        # окно; полный текст доступен в tooltip.
         self.status_label = QLabel("Не подключено")
+        self.status_label.setWordWrap(True)
         panel_layout.addWidget(self.status_label)
 
         layout.addWidget(top_panel)
