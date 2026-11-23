@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -11,6 +12,29 @@ except Exception:  # pragma: no cover - keyring необязателен
     keyring = None
 
 
+def default_config_dir() -> Path:
+    """Каталог конфигурации платформы.
+
+    Windows: ``%APPDATA%\\VaultPass`` (Credential-roaming каталог).
+    POSIX: ``~/.config/vaultpass`` по спецификации XDG.
+    """
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / "VaultPass"
+    return Path.home() / ".config" / "vaultpass"
+
+
+def chmod_secure(path, mode: int):
+    """Права доступа POSIX-only.
+
+    На Windows chmod не задаёт POSIX-биты, а ложные ожидания безопасности
+    хуже их отсутствия: там ключ живёт в Credential Manager (keyring).
+    """
+    if sys.platform != "win32":
+        os.chmod(path, mode)
+
+
 class ConfigManager:
     """Хранение настроек подключения к Vault.
 
@@ -19,7 +43,7 @@ class ConfigManager:
     Старый каталог ``~/.config/vault-manager`` автоматически мигрирует.
     """
 
-    CONFIG_DIR = Path.home() / ".config" / "vaultpass"
+    CONFIG_DIR = default_config_dir()
     CONFIG_FILE = CONFIG_DIR / "config.enc"
     KEY_FILE = CONFIG_DIR / "key.bin"
 
@@ -39,7 +63,7 @@ class ConfigManager:
     def _ensure_config_dir(self):
         self.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         # Каталог доступен только владельцу
-        os.chmod(self.CONFIG_DIR, 0o700)
+        chmod_secure(self.CONFIG_DIR, 0o700)
 
     def _migrate_legacy(self):
         """Переносим конфиг из старого каталога, если он ещё используется."""
@@ -58,7 +82,7 @@ class ConfigManager:
                     self._write_key_file(key)
 
             shutil.copy2(legacy_config, self.CONFIG_FILE)
-            os.chmod(self.CONFIG_FILE, 0o600)
+            chmod_secure(self.CONFIG_FILE, 0o600)
         except OSError:
             # Миграция не критична: при ошибке просто останемся без конфига.
             return
@@ -96,7 +120,7 @@ class ConfigManager:
         tmp_path = self.KEY_FILE.with_suffix(".tmp")
         with open(tmp_path, "wb") as f:
             f.write(key)
-        os.chmod(tmp_path, 0o600)
+        chmod_secure(tmp_path, 0o600)
         os.replace(tmp_path, self.KEY_FILE)
 
     def _load_or_create_key(self) -> bytes:
@@ -148,7 +172,7 @@ class ConfigManager:
         tmp_path = self.CONFIG_FILE.with_suffix(".tmp")
         with open(tmp_path, "wb") as f:
             f.write(encrypted)
-        os.chmod(tmp_path, 0o600)
+        chmod_secure(tmp_path, 0o600)
         os.replace(tmp_path, self.CONFIG_FILE)
 
     def load_config(self):

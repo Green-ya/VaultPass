@@ -1,5 +1,7 @@
 import json
 import stat
+import sys
+from pathlib import Path
 
 import pytest
 from cryptography.fernet import Fernet
@@ -38,6 +40,9 @@ def test_save_and_load_roundtrip(manager):
     }
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX-права на Windows не применяются"
+)
 def test_config_and_key_permissions(manager):
     manager.save_config("https://vault.local", "token")
 
@@ -138,6 +143,9 @@ def test_key_from_keyring_survives_restart(tmp_path, monkeypatch):
     }
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX-права на Windows не применяются"
+)
 def test_key_falls_back_to_file_when_keyring_broken(tmp_path, monkeypatch):
     monkeypatch.setattr(config_module, "keyring", FakeKeyring(working=False))
     _patch_config_paths(tmp_path, monkeypatch)
@@ -178,3 +186,30 @@ def test_legacy_key_migrates_into_keyring(tmp_path, monkeypatch):
     assert stored.encode() == key
     assert not manager.KEY_FILE.exists()
     assert manager.load_config() == payload
+
+
+def test_default_config_dir_posix(monkeypatch):
+    monkeypatch.setattr(config_module.sys, "platform", "linux")
+    monkeypatch.delenv("APPDATA", raising=False)
+    result = config_module.default_config_dir()
+    assert result == Path.home() / ".config" / "vaultpass"
+
+
+def test_default_config_dir_windows(monkeypatch):
+    monkeypatch.setattr(config_module.sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", r"C:\Users\test\AppData\Roaming")
+    result = config_module.default_config_dir()
+    assert result == Path(r"C:\Users\test\AppData\Roaming") / "VaultPass"
+
+
+def test_chmod_secure_skipped_on_windows(tmp_path, monkeypatch):
+    """На Windows chmod_secure не вызывает os.chmod (биты там не работают)."""
+    monkeypatch.setattr(config_module.sys, "platform", "win32")
+    called = []
+
+    def _fake_chmod(path, mode):
+        called.append((path, mode))
+
+    monkeypatch.setattr(config_module.os, "chmod", _fake_chmod)
+    config_module.chmod_secure(tmp_path / "x", 0o600)
+    assert called == []

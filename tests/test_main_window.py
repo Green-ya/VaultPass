@@ -520,7 +520,8 @@ def test_purge_expired_cache_removes_old_entries(window):
 def test_connect_starts_and_disconnect_stops_cache_timer(window, monkeypatch):
     class StubClient:
         def __init__(self, *args, **kwargs):
-            pass
+            self.mount_point = "secret"
+            self.url = args[0] if args else kwargs.get("url", "")
 
         def list_secrets(self, path=""):
             return []

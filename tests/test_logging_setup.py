@@ -1,4 +1,5 @@
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 
 import pytest
@@ -41,6 +42,9 @@ def _file_handlers(root):
     return [h for h in root.handlers if isinstance(h, RotatingFileHandler)]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX-права на Windows не применяются"
+)
 def test_setup_logging_writes_to_file(restored_root, log_paths):
     log_dir, log_file = log_paths
     logging_setup.setup_logging(debug=False)

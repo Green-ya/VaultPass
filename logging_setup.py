@@ -6,12 +6,12 @@
 """
 
 import logging
-import os
 import sys
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
 
-LOG_DIR = Path.home() / ".config" / "vaultpass"
+from config_manager import chmod_secure, default_config_dir
+
+LOG_DIR = default_config_dir()
 LOG_FILE = LOG_DIR / "vaultpass.log"
 
 LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
@@ -23,7 +23,7 @@ BACKUP_COUNT = 3
 def _make_file_handler(level: int):
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        os.chmod(LOG_DIR, 0o700)
+        chmod_secure(LOG_DIR, 0o700)
         handler = RotatingFileHandler(
             LOG_FILE,
             maxBytes=MAX_BYTES,
